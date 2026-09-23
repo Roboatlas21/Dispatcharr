@@ -62,25 +62,25 @@ export const PROXY_SETTINGS_OPTIONS = {
     label: 'Failover Initialization Timeout',
     advanced: true,
     description:
-      'Maximum seconds to wait for a newly selected failover stream to start producing data before trying the next available stream. This is separate from Buffering Timeout, which controls how quickly an already-playing stream is considered stalled.',
+      'Maximum seconds to wait for a newly selected backup stream to start producing data while failover is in progress. Backup streams that do not produce any data within this time are skipped and the next available stream is tried.',
   },
   upstream_read_timeout: {
     label: 'Upstream Read Timeout',
     advanced: true,
     description:
-      'Maximum seconds an HTTP/HTTPS FFmpeg upstream can stop delivering network data before the connection is abandoned. Applies to both initial and failover streams. Set to 0 to disable.',
+      'Maximum seconds FFmpeg will wait when no new data is arriving from an HTTP/HTTPS provider. Applies only when FFmpeg is reading the stream. Set to 0 to disable.',
   },
   stream_connection_attempts: {
     label: 'Connection Attempts per Stream',
     advanced: true,
     description:
-      'Total connection attempts for the first source in each pass or recovery of a working source. Alternates that fail before producing media are skipped after one attempt.',
+      'Number of connection attempts for the preferred stream, or for a stream that was already working. New backup streams are tried once before moving to the next one.',
   },
   min_failover_rotation_interval: {
     label: 'Minimum Failover Rotation Interval',
     advanced: true,
     description:
-      'Minimum seconds between the starts of complete source passes. Time spent trying sources counts toward the interval; 0 adds no wait.',
+      'Minimum seconds before starting over from the first stream after all available streams have been tried. Time spent trying streams counts toward this interval. Set to 0 to retry immediately.',
   },
   channel_client_wait_period: {
     label: 'Client Connect Grace Period',
