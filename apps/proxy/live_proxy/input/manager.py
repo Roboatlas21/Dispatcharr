@@ -2337,7 +2337,7 @@ class StreamManager:
                 # Add to tried streams
                 self.tried_stream_ids.add(stream_id)
 
-                # Get stream info including URL using the profile_id we already have
+                # Resolve stream info and the profile actually selected for this switch
                 logger.info(f"Trying next stream ID {stream_id} with profile ID {profile_id} for channel {self.channel_id}")
                 stream_info = get_stream_info_for_switch(self.channel_id, stream_id)
                 status = self._selection_status(generation)
@@ -2347,6 +2347,10 @@ class StreamManager:
                 if 'error' in stream_info or not stream_info.get('url'):
                     logger.error(f"Error getting info for stream {stream_id} for channel {self.channel_id}: {stream_info.get('error', 'No URL')}")
                     continue  # Try next stream instead of giving up
+
+                # Use the profile selected by get_stream_info_for_switch for both
+                # connection accounting and Redis metadata.
+                profile_id = stream_info['m3u_profile_id']
 
                 # Update URL and user agent
                 new_url = stream_info['url']
@@ -2395,14 +2399,14 @@ class StreamManager:
                 self.user_agent = new_user_agent
                 self.transcode = new_transcode
 
-                # Update stream metadata in Redis - use the profile_id we got from get_alternate_streams
+                # Update stream metadata in Redis with the profile actually selected for the switch
                 if hasattr(self.buffer, 'redis_client') and self.buffer.redis_client:
                     metadata_key = RedisKeys.channel_metadata(self.channel_id)
                     self.buffer.redis_client.hset(metadata_key, mapping={
                         ChannelMetadataField.URL: new_url,
                         ChannelMetadataField.USER_AGENT: new_user_agent,
                         ChannelMetadataField.STREAM_PROFILE: stream_info['stream_profile'],
-                        ChannelMetadataField.M3U_PROFILE: str(profile_id),  # Use the profile_id from get_alternate_streams
+                        ChannelMetadataField.M3U_PROFILE: str(profile_id),
                         ChannelMetadataField.STREAM_ID: str(stream_id),
                         ChannelMetadataField.STREAM_SWITCH_TIME: str(time.time()),
                         ChannelMetadataField.STREAM_SWITCH_REASON: "max_retries_exceeded"
