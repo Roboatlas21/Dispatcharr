@@ -64,6 +64,12 @@ export const PROXY_SETTINGS_OPTIONS = {
     description:
       'Maximum seconds to wait for a newly selected failover stream to start producing data before trying the next available stream. This is separate from Buffering Timeout, which controls how quickly an already-playing stream is considered stalled.',
   },
+  upstream_read_timeout: {
+    label: 'Upstream Read Timeout',
+    advanced: true,
+    description:
+      'Maximum seconds an HTTP/HTTPS FFmpeg upstream can stop delivering network data before the connection is abandoned. Applies to both initial and failover streams. Set to 0 to disable.',
+  },
   channel_client_wait_period: {
     label: 'Client Connect Grace Period',
     advanced: true,

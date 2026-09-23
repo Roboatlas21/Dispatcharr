@@ -55,6 +55,7 @@ class BaseConfig:
                 "channel_shutdown_delay": 0,
                 "channel_init_grace_period": 60,
                 "failover_init_grace_period": 30,
+                "upstream_read_timeout": 10,
                 "channel_client_wait_period": 5,
                 "new_client_behind_seconds": 5,
                 "validate_redirect_urls": True,
@@ -158,6 +159,12 @@ class TSConfig(BaseConfig):
         return settings.get("failover_init_grace_period", 30)
 
     @classmethod
+    def get_upstream_read_timeout(cls):
+        """Max seconds an HTTP/HTTPS FFmpeg input may go without network data."""
+        settings = cls.get_proxy_settings()
+        return settings.get("upstream_read_timeout", 10)
+
+    @classmethod
     def get_channel_client_wait_period(cls):
         """Seconds to keep a ready channel alive waiting for the first client to connect."""
         settings = cls.get_proxy_settings()
@@ -189,6 +196,10 @@ class TSConfig(BaseConfig):
     @property
     def FAILOVER_INIT_GRACE_PERIOD(self):
         return self.get_failover_init_grace_period()
+
+    @property
+    def UPSTREAM_READ_TIMEOUT(self):
+        return self.get_upstream_read_timeout()
 
     @property
     def CHANNEL_CLIENT_WAIT_PERIOD(self):

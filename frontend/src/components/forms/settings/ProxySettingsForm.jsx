@@ -27,6 +27,7 @@ const isNumericField = (key) => {
     'channel_shutdown_delay',
     'channel_init_grace_period',
     'failover_init_grace_period',
+    'upstream_read_timeout',
     'channel_client_wait_period',
     'new_client_behind_seconds',
   ].includes(key);

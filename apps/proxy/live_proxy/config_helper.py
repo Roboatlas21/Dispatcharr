@@ -131,6 +131,11 @@ class ConfigHelper:
         return Config.get_failover_init_grace_period()
 
     @staticmethod
+    def upstream_read_timeout():
+        """Max seconds an HTTP/HTTPS FFmpeg input may go without network data."""
+        return Config.get_upstream_read_timeout()
+
+    @staticmethod
     def channel_client_wait_period():
         """Seconds to keep a ready channel alive waiting for the first client to connect."""
         return Config.get_channel_client_wait_period()

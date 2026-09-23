@@ -59,6 +59,7 @@ class StreamManager:
         self.buffering = False
         self.buffering_timeout = ConfigHelper.buffering_timeout()
         self.failover_init_grace_period = ConfigHelper.failover_init_grace_period()
+        self.upstream_read_timeout = ConfigHelper.upstream_read_timeout()
         self.buffering_speed = ConfigHelper.buffering_speed()
         self.buffering_start_time = None
         self.failover_started_at = None
@@ -830,11 +831,11 @@ class StreamManager:
                 else:
                     logger.debug(f"Unknown stream command '{self.stream_command}', will use auto-detection for log parsing")
 
-                # A failover candidate can legitimately take a while for FFmpeg
-                # to probe, but a completely silent HTTP input should not consume
-                # the full failover initialization timeout.
+                # Keep a slow-but-active source eligible for the normal startup
+                # limits, while abandoning an HTTP input that stops delivering
+                # network data. Applies to both initial and failover streams.
                 if (
-                    self.failover_started_at is not None
+                    self.upstream_read_timeout > 0
                     and self.stream_command.lower() == 'ffmpeg'
                     and self.url.lower().startswith(('http://', 'https://'))
                     and '-rw_timeout' not in self.transcode_cmd
@@ -843,13 +844,13 @@ class StreamManager:
                         input_index = self.transcode_cmd.index('-i')
                     except ValueError:
                         logger.warning(
-                            f"Could not add FFmpeg failover read timeout for channel "
+                            f"Could not add FFmpeg upstream read timeout for channel "
                             f"{self.channel_id}: input marker not found"
                         )
                     else:
                         self.transcode_cmd[input_index:input_index] = [
                             '-rw_timeout',
-                            '10000000',
+                            str(int(self.upstream_read_timeout * 1_000_000)),
                         ]
 
                 # For UDP streams, remove any user_agent parameters from the command

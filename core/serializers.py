@@ -133,6 +133,12 @@ class ProxySettingsSerializer(serializers.Serializer):
         required=False,
         default=30,
     )
+    upstream_read_timeout = serializers.IntegerField(
+        min_value=0,
+        max_value=300,
+        required=False,
+        default=10,
+    )
     channel_client_wait_period = serializers.IntegerField(min_value=0, max_value=300, required=False, default=5)
     new_client_behind_seconds = serializers.IntegerField(min_value=0, max_value=120, required=False, default=5)
     validate_redirect_urls = serializers.BooleanField(required=False, default=True)
@@ -168,6 +174,13 @@ class ProxySettingsSerializer(serializers.Serializer):
         if value < 0 or value > 300:
             raise serializers.ValidationError(
                 "Failover initialization timeout must be between 0 and 300 seconds"
+            )
+        return value
+
+    def validate_upstream_read_timeout(self, value):
+        if value < 0 or value > 300:
+            raise serializers.ValidationError(
+                "Upstream read timeout must be between 0 and 300 seconds"
             )
         return value
 
