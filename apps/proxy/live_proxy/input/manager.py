@@ -830,6 +830,28 @@ class StreamManager:
                 else:
                     logger.debug(f"Unknown stream command '{self.stream_command}', will use auto-detection for log parsing")
 
+                # A failover candidate can legitimately take a while for FFmpeg
+                # to probe, but a completely silent HTTP input should not consume
+                # the full failover initialization timeout.
+                if (
+                    self.failover_started_at is not None
+                    and self.stream_command.lower() == 'ffmpeg'
+                    and self.url.lower().startswith(('http://', 'https://'))
+                    and '-rw_timeout' not in self.transcode_cmd
+                ):
+                    try:
+                        input_index = self.transcode_cmd.index('-i')
+                    except ValueError:
+                        logger.warning(
+                            f"Could not add FFmpeg failover read timeout for channel "
+                            f"{self.channel_id}: input marker not found"
+                        )
+                    else:
+                        self.transcode_cmd[input_index:input_index] = [
+                            '-rw_timeout',
+                            '10000000',
+                        ]
+
                 # For UDP streams, remove any user_agent parameters from the command
                 if hasattr(self, 'stream_type') and self.stream_type == StreamType.UDP:
                     # Filter out any arguments that contain the user_agent value or related headers
@@ -1964,8 +1986,18 @@ class StreamManager:
                 return False
 
             if not chunk:
-                # Connection closed by server
+                # Connection closed by server/process
                 logger.warning(f"Server closed connection for channel {self.channel_id}")
+
+                # If FFmpeg exits before a failover candidate produces any usable
+                # output, move on instead of retrying the same candidate.
+                if (
+                    self.failover_started_at is not None
+                    and self.stream_command
+                    and self.stream_command.lower() == 'ffmpeg'
+                ):
+                    self.needs_stream_switch = True
+
                 self._close_socket()
                 self.connected = False
                 return False
