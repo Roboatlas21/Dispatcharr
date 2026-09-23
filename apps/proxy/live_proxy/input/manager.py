@@ -1650,7 +1650,79 @@ class StreamManager:
 
         # Import models for stream/profile assignment management
         from apps.channels.models import Channel
+        from core.utils import RedisClient
         from django.db import connection
+
+        channel = None
+        assignment_moved = False
+        old_assignment_stream_id = None
+        old_assignment_profile_id = None
+
+        def _rollback_stream_assignment():
+            """Restore the prior stream/profile assignment if this switch aborts."""
+            nonlocal assignment_moved
+            if (
+                not assignment_moved
+                or channel is None
+                or old_assignment_stream_id is None
+                or old_assignment_profile_id is None
+            ):
+                return
+
+            try:
+                redis_client = RedisClient.get_client()
+                assigned_stream_id = redis_client.get(
+                    f"channel_stream:{channel.id}"
+                )
+                if assigned_stream_id is not None:
+                    assigned_stream_id = int(assigned_stream_id)
+
+                # A newer/manual switch may already have replaced our target.
+                # Never roll that newer assignment back.
+                if assigned_stream_id != int(stream_id):
+                    logger.info(
+                        f"Skipping rollback for channel {self.channel_id}: "
+                        f"stream assignment was superseded"
+                    )
+                    assignment_moved = False
+                    return
+
+                assigned_profile_id = redis_client.get(
+                    f"stream_profile:{stream_id}"
+                )
+                if assigned_profile_id is not None:
+                    assigned_profile_id = int(assigned_profile_id)
+
+                if assigned_profile_id != int(m3u_profile_id):
+                    logger.info(
+                        f"Skipping rollback for channel {self.channel_id}: "
+                        f"profile assignment was superseded"
+                    )
+                    assignment_moved = False
+                    return
+
+                restored = channel.update_stream_profile(
+                    old_assignment_profile_id,
+                    new_stream_id=old_assignment_stream_id,
+                )
+                if restored:
+                    assignment_moved = False
+                    logger.info(
+                        f"Rolled back channel {self.channel_id} assignment to "
+                        f"stream {old_assignment_stream_id}, M3U profile "
+                        f"{old_assignment_profile_id}"
+                    )
+                else:
+                    logger.error(
+                        f"Failed to roll back channel {self.channel_id} "
+                        f"stream/profile assignment"
+                    )
+            except Exception as rollback_error:
+                logger.error(
+                    f"Error rolling back stream/profile assignment for channel "
+                    f"{self.channel_id}: {rollback_error}",
+                    exc_info=True,
+                )
 
         try:
             if not self._ensure_owner_or_stop():
@@ -1669,6 +1741,20 @@ class StreamManager:
             ):
                 try:
                     channel = Channel.objects.get(uuid=self.channel_id)
+                    redis_client = RedisClient.get_client()
+                    old_assignment_stream_id = redis_client.get(
+                        f"channel_stream:{channel.id}"
+                    )
+                    if old_assignment_stream_id is not None:
+                        old_assignment_stream_id = int(old_assignment_stream_id)
+                        old_assignment_profile_id = redis_client.get(
+                            f"stream_profile:{old_assignment_stream_id}"
+                        )
+                        if old_assignment_profile_id is not None:
+                            old_assignment_profile_id = int(
+                                old_assignment_profile_id
+                            )
+
                     success = channel.update_stream_profile(
                         m3u_profile_id,
                         new_stream_id=stream_id,
@@ -1680,6 +1766,11 @@ class StreamManager:
                             f"channel {self.channel_id}; trying another candidate"
                         )
                         return False
+
+                    assignment_moved = (
+                        old_assignment_stream_id is not None
+                        and old_assignment_profile_id is not None
+                    )
                     logger.debug(
                         f"Moved channel {self.channel_id} assignment to stream "
                         f"{stream_id}, M3U profile {m3u_profile_id}"
@@ -1698,10 +1789,13 @@ class StreamManager:
                         pass
 
             if generation != self._rotation_generation:
+                _rollback_stream_assignment()
                 return None
             if not self._ensure_owner_or_stop():
+                _rollback_stream_assignment()
                 return False
             if generation != self._rotation_generation:
+                _rollback_stream_assignment()
                 return None
             # Check which type of connection we're using and close it properly
             if self.transcode or self.socket:
@@ -1712,8 +1806,10 @@ class StreamManager:
                 self._close_connection()
 
             if self.stop_requested or not self.running:
+                _rollback_stream_assignment()
                 return False
             if generation != self._rotation_generation:
+                _rollback_stream_assignment()
                 return None
             # Update URL and reset connection state
             old_url = self.url
@@ -1747,6 +1843,7 @@ class StreamManager:
             if stream_id:
                 old_stream_id = self.current_stream_id
                 self.current_stream_id = stream_id
+                assignment_moved = False  # URL/local state now commits the assignment.
                 # Add stream ID to tried streams for proper tracking
                 self.tried_stream_ids.add(stream_id)
                 logger.info(f"Updated stream ID from {old_stream_id} to {stream_id} for channel {self.channel_id}")
@@ -1776,6 +1873,7 @@ class StreamManager:
 
             return True if generation == self._rotation_generation else None
         except Exception as e:
+            _rollback_stream_assignment()
             logger.error(f"Error during URL update for channel {self.channel_id}: {e}", exc_info=True)
             return False if generation == self._rotation_generation else None
         finally:
