@@ -28,6 +28,8 @@ const isNumericField = (key) => {
     'channel_init_grace_period',
     'failover_init_grace_period',
     'upstream_read_timeout',
+    'stream_connection_attempts',
+    'min_failover_rotation_interval',
     'channel_client_wait_period',
     'new_client_behind_seconds',
   ].includes(key);
@@ -38,6 +40,7 @@ const isFloatField = (key) => key === 'buffering_speed';
 const isBooleanField = (_key, config) => config?.type === 'boolean';
 
 const getNumericFieldMax = (key) => {
+  if (key === 'stream_connection_attempts') return 5;
   if (key === 'buffering_timeout') return 300;
   if (key === 'redis_chunk_ttl') return 3600;
   if (key === 'channel_shutdown_delay') return 300;
@@ -65,8 +68,10 @@ const renderProxySettingField = (key, config, proxySettingsForm) => {
         label={config.label}
         {...proxySettingsForm.getInputProps(key)}
         description={config.description || null}
-        min={0}
+        min={key === 'stream_connection_attempts' ? 1 : 0}
         max={getNumericFieldMax(key)}
+        allowDecimal={!['stream_connection_attempts', 'min_failover_rotation_interval'].includes(key)}
+        step={1}
       />
     );
   }
@@ -148,6 +153,14 @@ const ProxySettingsForm = React.memo(({ active }) => {
   const proxySettingsForm = useForm({
     mode: 'controlled',
     initialValues: getProxySettingsFormInitialValues(),
+    validate: {
+      stream_connection_attempts: (value) =>
+        Number.isInteger(value) && value >= 1 && value <= 5
+          ? null : 'Use a whole number between 1 and 5.',
+      min_failover_rotation_interval: (value) =>
+        Number.isInteger(value) && value >= 0 && value <= 300
+          ? null : 'Use a whole number between 0 and 300.',
+    },
   });
 
   useEffect(() => {

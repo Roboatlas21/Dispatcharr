@@ -70,6 +70,18 @@ export const PROXY_SETTINGS_OPTIONS = {
     description:
       'Maximum seconds an HTTP/HTTPS FFmpeg upstream can stop delivering network data before the connection is abandoned. Applies to both initial and failover streams. Set to 0 to disable.',
   },
+  stream_connection_attempts: {
+    label: 'Connection Attempts per Stream',
+    advanced: true,
+    description:
+      'Total connection attempts for the first source in each pass or recovery of a working source. Alternates that fail before producing media are skipped after one attempt.',
+  },
+  min_failover_rotation_interval: {
+    label: 'Minimum Failover Rotation Interval',
+    advanced: true,
+    description:
+      'Minimum seconds between the starts of complete source passes. Time spent trying sources counts toward the interval; 0 adds no wait.',
+  },
   channel_client_wait_period: {
     label: 'Client Connect Grace Period',
     advanced: true,

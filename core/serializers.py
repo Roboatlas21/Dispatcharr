@@ -10,7 +10,23 @@ from dispatcharr.log_collector import (
     MAX_LOG_KEEP,
     MAX_LOG_MB,
 )
-from .models import CoreSettings, UserAgent, StreamProfile, OutputProfile, DVR_SETTINGS_KEY, NETWORK_ACCESS_KEY, SYSTEM_SETTINGS_KEY
+from .models import CoreSettings, UserAgent, StreamProfile, OutputProfile, DVR_SETTINGS_KEY, NETWORK_ACCESS_KEY, SYSTEM_SETTINGS_KEY, PROXY_SETTINGS_KEY
+
+
+def _validate_failover_controls(value):
+    if not isinstance(value, dict):
+        return {"non_field_errors": ["Proxy settings must be a JSON object."]}
+    errors = {}
+    for key, minimum, maximum in (
+        ("stream_connection_attempts", 1, 5),
+        ("min_failover_rotation_interval", 0, 300),
+    ):
+        if key not in value:
+            continue
+        number = value[key]
+        if type(number) is not int or not minimum <= number <= maximum:
+            errors[key] = [f"Use an integer between {minimum} and {maximum}."]
+    return errors
 
 
 def _clamp_int(value, default, lo, hi):
@@ -59,6 +75,15 @@ class CoreSettingsSerializer(serializers.ModelSerializer):
     class Meta:
         model = CoreSettings
         fields = "__all__"
+
+    def validate(self, attrs):
+        attrs = super().validate(attrs)
+        key = attrs.get("key", getattr(self.instance, "key", None))
+        if key == PROXY_SETTINGS_KEY and "value" in attrs:
+            errors = _validate_failover_controls(attrs["value"])
+            if errors:
+                raise serializers.ValidationError({"value": errors})
+        return attrs
 
     def update(self, instance, validated_data):
         if instance.key == NETWORK_ACCESS_KEY:
@@ -120,6 +145,13 @@ class CoreSettingsSerializer(serializers.ModelSerializer):
 
         return result
 
+class StrictProxyIntegerField(serializers.IntegerField):
+    def to_internal_value(self, data):
+        if type(data) is not int:
+            self.fail("invalid")
+        return super().to_internal_value(data)
+
+
 class ProxySettingsSerializer(serializers.Serializer):
     """Serializer for proxy settings stored as JSON in CoreSettings"""
     buffering_timeout = serializers.IntegerField(min_value=0, max_value=300)
@@ -138,6 +170,12 @@ class ProxySettingsSerializer(serializers.Serializer):
         max_value=300,
         required=False,
         default=10,
+    )
+    stream_connection_attempts = StrictProxyIntegerField(
+        min_value=1, max_value=5, required=False, default=3,
+    )
+    min_failover_rotation_interval = StrictProxyIntegerField(
+        min_value=0, max_value=300, required=False, default=10,
     )
     channel_client_wait_period = serializers.IntegerField(min_value=0, max_value=300, required=False, default=5)
     new_client_behind_seconds = serializers.IntegerField(min_value=0, max_value=120, required=False, default=5)

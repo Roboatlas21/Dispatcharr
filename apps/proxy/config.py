@@ -12,7 +12,6 @@ class BaseConfig:
     RETRY_WAIT_INTERVAL = 0.5  # seconds to wait between retries
     CONNECTION_TIMEOUT = 10  # seconds to wait for initial connection
     MAX_STREAM_SWITCHES = 10  # Maximum number of stream switch attempts before giving up
-    FAILOVER_ROTATION_COOLDOWN = 60 # Wait this long after exhausting all streams before wrapping back to the top.
     BUFFER_CHUNK_SIZE = 188 * 1361  # ~256KB
     BUFFERING_TIMEOUT = 15  # Seconds to wait for buffering before switching streams
     BUFFER_SPEED = 1 # What speed to condsider the stream buffering, 1x is normal speed, 2x is double speed, etc.
@@ -56,6 +55,8 @@ class BaseConfig:
                 "channel_init_grace_period": 60,
                 "failover_init_grace_period": 30,
                 "upstream_read_timeout": 10,
+                "stream_connection_attempts": 3,
+                "min_failover_rotation_interval": 10,
                 "channel_client_wait_period": 5,
                 "new_client_behind_seconds": 5,
                 "validate_redirect_urls": True,
@@ -163,6 +164,28 @@ class TSConfig(BaseConfig):
         """Max seconds an HTTP/HTTPS FFmpeg input may go without network data."""
         settings = cls.get_proxy_settings()
         return settings.get("upstream_read_timeout", 10)
+
+    @classmethod
+    def get_stream_connection_attempts(cls):
+        """Total manager attempts for a primary or established stream."""
+        settings = cls.get_proxy_settings()
+        if not isinstance(settings, dict):
+            return 3
+        value = settings.get("stream_connection_attempts", 3)
+        if type(value) is int and 1 <= value <= 5:
+            return value
+        return 3
+
+    @classmethod
+    def get_min_failover_rotation_interval(cls):
+        """Minimum seconds between the starts of complete source passes."""
+        settings = cls.get_proxy_settings()
+        if not isinstance(settings, dict):
+            return 10
+        value = settings.get("min_failover_rotation_interval", 10)
+        if type(value) is int and 0 <= value <= 300:
+            return value
+        return 10
 
     @classmethod
     def get_channel_client_wait_period(cls):

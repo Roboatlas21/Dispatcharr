@@ -16,6 +16,8 @@ export const getProxySettingDefaults = () => {
     channel_init_grace_period: 60,
     failover_init_grace_period: 30,
     upstream_read_timeout: 10,
+    stream_connection_attempts: 3,
+    min_failover_rotation_interval: 10,
     channel_client_wait_period: 5,
     new_client_behind_seconds: 5,
     validate_redirect_urls: true,
