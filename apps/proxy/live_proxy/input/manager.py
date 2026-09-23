@@ -1648,38 +1648,57 @@ class StreamManager:
 
         logger.info(f"Switching stream URL from {self.url} to {new_url} for channel {self.channel_id}")
 
-        # Import both models for proper resource management
-        from apps.channels.models import Stream, Channel
+        # Import models for stream/profile assignment management
+        from apps.channels.models import Channel
         from django.db import connection
 
-        # Update stream profile if we're switching streams
-        if self.current_stream_id and stream_id and self.current_stream_id != stream_id:
-            try:
-                # Get the channel by UUID
-                channel = Channel.objects.get(uuid=self.channel_id)
-
-                # Get stream to find its profile
-                #new_stream = Stream.objects.get(pk=stream_id)
-
-                # Use the new method to update the profile and manage connection counts
-                if m3u_profile_id:
-                    success = channel.update_stream_profile(m3u_profile_id)
-                    if success:
-                        logger.debug(f"Updated m3u profile for channel {self.channel_id} to use profile from stream {stream_id}")
-                    else:
-                        logger.warning(f"Failed to update stream profile for channel {self.channel_id}")
-
-            except Exception as e:
-                logger.error(f"Error updating stream profile for channel {self.channel_id}: {e}")
-
-            finally:
-                # Always close database connection after profile update
-                try:
-                    connection.close()
-                except Exception:
-                    pass
-
         try:
+            if not self._ensure_owner_or_stop():
+                return False
+            if generation != self._rotation_generation:
+                return None
+
+            # Reserve capacity and move the Redis stream/profile assignment
+            # before changing the URL. A capacity race must reject this
+            # candidate instead of connecting without a valid provider slot.
+            if (
+                self.current_stream_id
+                and stream_id
+                and self.current_stream_id != stream_id
+                and m3u_profile_id
+            ):
+                try:
+                    channel = Channel.objects.get(uuid=self.channel_id)
+                    success = channel.update_stream_profile(
+                        m3u_profile_id,
+                        new_stream_id=stream_id,
+                    )
+                    if not success:
+                        logger.warning(
+                            f"Failed to reserve/move M3U profile "
+                            f"{m3u_profile_id} for stream {stream_id} on "
+                            f"channel {self.channel_id}; trying another candidate"
+                        )
+                        return False
+                    logger.debug(
+                        f"Moved channel {self.channel_id} assignment to stream "
+                        f"{stream_id}, M3U profile {m3u_profile_id}"
+                    )
+                except Exception as e:
+                    logger.error(
+                        f"Error moving stream/profile assignment for channel "
+                        f"{self.channel_id}: {e}",
+                        exc_info=True,
+                    )
+                    return False
+                finally:
+                    try:
+                        connection.close()
+                    except Exception:
+                        pass
+
+            if generation != self._rotation_generation:
+                return None
             if not self._ensure_owner_or_stop():
                 return False
             if generation != self._rotation_generation:
