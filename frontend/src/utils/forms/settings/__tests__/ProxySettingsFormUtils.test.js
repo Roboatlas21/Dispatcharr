@@ -61,6 +61,10 @@ describe('ProxySettingsFormUtils', () => {
         redis_chunk_ttl: 60,
         channel_shutdown_delay: 0,
         channel_init_grace_period: 60,
+        failover_init_grace_period: 30,
+        upstream_read_timeout: 10,
+        stream_connection_attempts: 3,
+        min_failover_rotation_interval: 10,
         channel_client_wait_period: 5,
         new_client_behind_seconds: 5,
         validate_redirect_urls: true,
@@ -83,6 +87,10 @@ describe('ProxySettingsFormUtils', () => {
       expect(typeof result.redis_chunk_ttl).toBe('number');
       expect(typeof result.channel_shutdown_delay).toBe('number');
       expect(typeof result.channel_init_grace_period).toBe('number');
+      expect(typeof result.failover_init_grace_period).toBe('number');
+      expect(typeof result.upstream_read_timeout).toBe('number');
+      expect(typeof result.stream_connection_attempts).toBe('number');
+      expect(typeof result.min_failover_rotation_interval).toBe('number');
       expect(typeof result.channel_client_wait_period).toBe('number');
       expect(typeof result.new_client_behind_seconds).toBe('number');
       expect(typeof result.validate_redirect_urls).toBe('boolean');
