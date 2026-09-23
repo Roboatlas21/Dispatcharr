@@ -26,6 +26,7 @@ const isNumericField = (key) => {
     'redis_chunk_ttl',
     'channel_shutdown_delay',
     'channel_init_grace_period',
+    'failover_init_grace_period',
     'channel_client_wait_period',
     'new_client_behind_seconds',
   ].includes(key);

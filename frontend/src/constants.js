@@ -58,6 +58,12 @@ export const PROXY_SETTINGS_OPTIONS = {
     description:
       'Maximum seconds to wait for the initial buffer to fill while a channel is connecting. Channels that never receive enough buffered data are stopped after this limit.',
   },
+  failover_init_grace_period: {
+    label: 'Failover Initialization Timeout',
+    advanced: true,
+    description:
+      'Maximum seconds to wait for a newly selected failover stream to start producing data before trying the next available stream. This is separate from Buffering Timeout, which controls how quickly an already-playing stream is considered stalled.',
+  },
   channel_client_wait_period: {
     label: 'Client Connect Grace Period',
     advanced: true,

@@ -54,6 +54,7 @@ class BaseConfig:
                 "redis_chunk_ttl": 60,
                 "channel_shutdown_delay": 0,
                 "channel_init_grace_period": 60,
+                "failover_init_grace_period": 15,
                 "channel_client_wait_period": 5,
                 "new_client_behind_seconds": 5,
                 "validate_redirect_urls": True,
@@ -151,6 +152,12 @@ class TSConfig(BaseConfig):
         return settings.get("channel_init_grace_period", 60)
 
     @classmethod
+    def get_failover_init_grace_period(cls):
+        """Max seconds to wait for first data from a newly selected failover stream."""
+        settings = cls.get_proxy_settings()
+        return settings.get("failover_init_grace_period", 15)
+
+    @classmethod
     def get_channel_client_wait_period(cls):
         """Seconds to keep a ready channel alive waiting for the first client to connect."""
         settings = cls.get_proxy_settings()
@@ -178,6 +185,10 @@ class TSConfig(BaseConfig):
     @property
     def CHANNEL_INIT_GRACE_PERIOD(self):
         return self.get_channel_init_grace_period()
+
+    @property
+    def FAILOVER_INIT_GRACE_PERIOD(self):
+        return self.get_failover_init_grace_period()
 
     @property
     def CHANNEL_CLIENT_WAIT_PERIOD(self):

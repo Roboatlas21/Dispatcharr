@@ -58,6 +58,7 @@ class StreamManager:
         self.url_switch_timeout = ConfigHelper.url_switch_timeout()
         self.buffering = False
         self.buffering_timeout = ConfigHelper.buffering_timeout()
+        self.failover_init_grace_period = ConfigHelper.failover_init_grace_period()
         self.buffering_speed = ConfigHelper.buffering_speed()
         self.buffering_start_time = None
         self.failover_started_at = None
@@ -520,11 +521,11 @@ class StreamManager:
                     if (
                         self.failover_started_at is not None
                         and time.monotonic() - self.failover_started_at
-                        >= self.buffering_timeout
+                        >= self.failover_init_grace_period
                     ):
                         logger.warning(
                             f"Failover stream produced no data within "
-                            f"{self.buffering_timeout}s for channel "
+                            f"{self.failover_init_grace_period}s for channel "
                             f"{self.channel_id}; trying next stream"
                         )
                         self.needs_stream_switch = True
@@ -1400,11 +1401,11 @@ class StreamManager:
                     if (
                         self.failover_started_at is not None
                         and time.monotonic() - self.failover_started_at
-                        >= self.buffering_timeout
+                        >= self.failover_init_grace_period
                     ):
                         logger.warning(
                             f"Failover stream produced no data within "
-                            f"{self.buffering_timeout}s for channel "
+                            f"{self.failover_init_grace_period}s for channel "
                             f"{self.channel_id}; trying next stream"
                         )
                         self.needs_stream_switch = True
@@ -1890,7 +1891,7 @@ class StreamManager:
             chunk_timeout = ConfigHelper.chunk_timeout()  # Use centralized timeout configuration
 
             if self.failover_started_at is not None:
-                remaining = self.buffering_timeout - (
+                remaining = self.failover_init_grace_period - (
                     time.monotonic() - self.failover_started_at
                 )
                 if remaining <= 0:

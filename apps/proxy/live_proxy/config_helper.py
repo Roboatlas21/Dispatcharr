@@ -126,6 +126,11 @@ class ConfigHelper:
         return Config.get_channel_init_grace_period()
 
     @staticmethod
+    def failover_init_grace_period():
+        """Max seconds to wait for first data from a newly selected failover stream."""
+        return Config.get_failover_init_grace_period()
+
+    @staticmethod
     def channel_client_wait_period():
         """Seconds to keep a ready channel alive waiting for the first client to connect."""
         return Config.get_channel_client_wait_period()

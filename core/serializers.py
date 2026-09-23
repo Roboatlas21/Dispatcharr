@@ -127,6 +127,12 @@ class ProxySettingsSerializer(serializers.Serializer):
     redis_chunk_ttl = serializers.IntegerField(min_value=10, max_value=3600)
     channel_shutdown_delay = serializers.IntegerField(min_value=0, max_value=300)
     channel_init_grace_period = serializers.IntegerField(min_value=0, max_value=300)
+    failover_init_grace_period = serializers.IntegerField(
+        min_value=0,
+        max_value=300,
+        required=False,
+        default=15,
+    )
     channel_client_wait_period = serializers.IntegerField(min_value=0, max_value=300, required=False, default=5)
     new_client_behind_seconds = serializers.IntegerField(min_value=0, max_value=120, required=False, default=5)
     validate_redirect_urls = serializers.BooleanField(required=False, default=True)
@@ -155,6 +161,13 @@ class ProxySettingsSerializer(serializers.Serializer):
         if value < 0 or value > 300:
             raise serializers.ValidationError(
                 "Channel initialization timeout must be between 0 and 300 seconds"
+            )
+        return value
+
+    def validate_failover_init_grace_period(self, value):
+        if value < 0 or value > 300:
+            raise serializers.ValidationError(
+                "Failover initialization timeout must be between 0 and 300 seconds"
             )
         return value
 
