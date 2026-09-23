@@ -131,7 +131,7 @@ class ProxySettingsSerializer(serializers.Serializer):
         min_value=0,
         max_value=300,
         required=False,
-        default=15,
+        default=30,
     )
     channel_client_wait_period = serializers.IntegerField(min_value=0, max_value=300, required=False, default=5)
     new_client_behind_seconds = serializers.IntegerField(min_value=0, max_value=120, required=False, default=5)

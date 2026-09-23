@@ -13,7 +13,7 @@ def add_failover_init_grace_period(apps, schema_editor):
         return
 
     value = obj.value if isinstance(obj.value, dict) else {}
-    value.setdefault("failover_init_grace_period", 15)
+    value.setdefault("failover_init_grace_period", 30)
 
     obj.value = value
     obj.save()
