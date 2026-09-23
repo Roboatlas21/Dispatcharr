@@ -60,6 +60,8 @@ class StreamManager:
         self.buffering_timeout = ConfigHelper.buffering_timeout()
         self.buffering_speed = ConfigHelper.buffering_speed()
         self.buffering_start_time = None
+        self.failover_started_at = None
+        self.pending_buffering_failover_duration = None
         # Store worker_id for ownership checks
         self.worker_id = worker_id
 
@@ -243,7 +245,7 @@ class StreamManager:
             if not self._sleep_interruptible(remaining):
                 return False
 
-        # Buffering-timeout (stderr thread) may already have wrapped while we slept.
+        # Another stream change may have happened while we slept.
         if self.current_stream_id != stream_before:
             return True
 
@@ -472,16 +474,21 @@ class StreamManager:
                         self.needs_stream_switch = True
 
                 if hasattr(self, 'needs_stream_switch') and self.needs_stream_switch and not self.url_switching:
-                    logger.info(f"Health monitor requested stream switch for channel {self.channel_id}")
+                    logger.info(f"Stream switch requested for channel {self.channel_id}")
                     self.needs_stream_switch = False
 
                     if self._try_next_stream_with_cooldown():
-                        logger.info(f"Health-requested stream switch successful for channel {self.channel_id}")
+                        logger.info(f"Requested stream switch successful for channel {self.channel_id}")
                         stream_switch_attempts += 1
                         self._clear_connection_failure_history()
                         continue  # Go back to main loop with new stream
                     else:
-                        logger.error(f"Health-requested stream switch failed for channel {self.channel_id}")
+                        logger.error(f"Requested stream switch failed for channel {self.channel_id}")
+                        self.failover_started_at = None
+                        if self.pending_buffering_failover_duration is not None:
+                            self.pending_buffering_failover_duration = None
+                            self.buffering = True
+                            self.buffering_start_time = time.time()
                         self._clear_connection_failure_history()
                         # Continue with normal flow
 
@@ -508,6 +515,19 @@ class StreamManager:
                     and not self.needs_stream_switch
                 ):
                     if not self._ensure_owner_or_stop():
+                        break
+
+                    if (
+                        self.failover_started_at is not None
+                        and time.monotonic() - self.failover_started_at
+                        >= self.buffering_timeout
+                    ):
+                        logger.warning(
+                            f"Failover stream produced no data within "
+                            f"{self.buffering_timeout}s for channel "
+                            f"{self.channel_id}; trying next stream"
+                        )
+                        self.needs_stream_switch = True
                         break
 
                     attempt = self.retry_count + 1
@@ -1166,13 +1186,17 @@ class StreamManager:
             logger.debug(f"FFmpeg stats for channel {self.channel_id}: - Speed: {ffmpeg_speed}x, FFmpeg FPS: {ffmpeg_fps}, "
                         f"Actual FPS: {actual_fps_str}, "
                         f"Output Bitrate: {ffmpeg_output_bitrate_str} kbps")
+            # A failover candidate is judged by whether it produces data, not
+            # by FFmpeg progress from the old/new process.
+            if (
+                self.url_switching
+                or self.failover_started_at is not None
+                or self.pending_buffering_failover_duration is not None
+            ):
+                return
+
             # If we have a valid speed, check for buffering
             if ffmpeg_speed is not None and ffmpeg_speed < self.buffering_speed:
-                # When a buffering-timeout failover clears the in-memory flag, also
-                # clear Redis and skip the BUFFERING write below. Otherwise the same
-                # stats sample re-writes buffering after self.buffering is False, and
-                # the speed-good recovery path can never clear the Redis label again.
-                switched_after_buffering_timeout = False
                 if self.buffering:
                     # Buffering is still ongoing, check for how long
                     if self.buffering_start_time is None:
@@ -1180,38 +1204,10 @@ class StreamManager:
                     else:
                         buffering_duration = time.time() - self.buffering_start_time
                         if buffering_duration > self.buffering_timeout:
-                            # Buffering timeout reached, log error and try next stream
                             logger.error(f"Buffering timeout reached for channel {self.channel_id} after {buffering_duration:.1f} seconds")
-                            # Send next stream request
-                            if self._try_next_stream():
-                                logger.info(f"Switched to next stream for channel {self.channel_id} after buffering timeout")
-                                # Reset buffering state
-                                self.buffering = False
-                                self.buffering_start_time = None
-                                switched_after_buffering_timeout = True
-
-                                # Clear the Redis buffering label.
-                                if hasattr(self.buffer, 'redis_client') and self.buffer.redis_client:
-                                    metadata_key = RedisKeys.channel_metadata(self.channel_id)
-                                    self.buffer.redis_client.hset(
-                                        metadata_key,
-                                        ChannelMetadataField.STATE,
-                                        ChannelState.ACTIVE,
-                                    )
-
-                                # Log failover event
-                                try:
-                                    log_system_event(
-                                        'channel_failover',
-                                        channel_id=self.channel_id,
-                                        channel_name=self.channel_name,
-                                        reason='buffering_timeout',
-                                        duration=buffering_duration
-                                    )
-                                except Exception as e:
-                                    logger.error(f"Could not log failover event: {e}")
-                            else:
-                                logger.error(f"Failed to switch to next stream for channel {self.channel_id} after buffering timeout")
+                            self.pending_buffering_failover_duration = buffering_duration
+                            self.needs_reconnect = False
+                            self.needs_stream_switch = True
                 else:
                     # Buffering just started, set the flag and start timer
                     self.buffering = True
@@ -1229,13 +1225,12 @@ class StreamManager:
                     except Exception as e:
                         logger.error(f"Could not log buffering event: {e}")
 
-                if not switched_after_buffering_timeout:
-                    # Log buffering warning
-                    logger.debug(f"FFmpeg speed on channel {self.channel_id} is below {self.buffering_speed} ({ffmpeg_speed}x) - buffering detected")
-                    # Set channel state to buffering
-                    if hasattr(self.buffer, 'redis_client') and self.buffer.redis_client:
-                        metadata_key = RedisKeys.channel_metadata(self.channel_id)
-                        self.buffer.redis_client.hset(metadata_key, ChannelMetadataField.STATE, ChannelState.BUFFERING)
+                # Log buffering warning
+                logger.debug(f"FFmpeg speed on channel {self.channel_id} is below {self.buffering_speed} ({ffmpeg_speed}x) - buffering detected")
+                # Set channel state to buffering
+                if hasattr(self.buffer, 'redis_client') and self.buffer.redis_client:
+                    metadata_key = RedisKeys.channel_metadata(self.channel_id)
+                    self.buffer.redis_client.hset(metadata_key, ChannelMetadataField.STATE, ChannelState.BUFFERING)
             elif ffmpeg_speed is not None and ffmpeg_speed >= self.buffering_speed:
                 # Speed is good, check if we were buffering
                 if self.buffering:
@@ -1369,10 +1364,52 @@ class StreamManager:
                    and not self.needs_stream_switch and not self.needs_reconnect):
                 if self.fetch_chunk():
                     self.last_data_time = time.time()
+
+                    if self.failover_started_at is not None:
+                        self.failover_started_at = None
+                        duration = self.pending_buffering_failover_duration
+                        self.pending_buffering_failover_duration = None
+
+                        if duration is not None:
+                            self.buffering = False
+                            self.buffering_start_time = None
+
+                            if hasattr(self.buffer, 'redis_client') and self.buffer.redis_client:
+                                metadata_key = RedisKeys.channel_metadata(self.channel_id)
+                                self.buffer.redis_client.hset(
+                                    metadata_key,
+                                    ChannelMetadataField.STATE,
+                                    ChannelState.ACTIVE,
+                                )
+
+                            try:
+                                log_system_event(
+                                    'channel_failover',
+                                    channel_id=self.channel_id,
+                                    channel_name=self.channel_name,
+                                    reason='buffering_timeout',
+                                    duration=duration,
+                                )
+                            except Exception as e:
+                                logger.error(f"Could not log failover event: {e}")
                 else:
                     # fetch_chunk() returned False - could be timeout, no data, or error
                     if not self.running:
                         break
+
+                    if (
+                        self.failover_started_at is not None
+                        and time.monotonic() - self.failover_started_at
+                        >= self.buffering_timeout
+                    ):
+                        logger.warning(
+                            f"Failover stream produced no data within "
+                            f"{self.buffering_timeout}s for channel "
+                            f"{self.channel_id}; trying next stream"
+                        )
+                        self.needs_stream_switch = True
+                        break
+
                     # Brief sleep before retry to avoid tight loop
                     gevent.sleep(0.1)
         except Exception as e:
@@ -1520,6 +1557,18 @@ class StreamManager:
             self.url = new_url
             self.connected = False
 
+            # Reset state that belongs to the previous source.
+            self.last_data_time = time.time()
+            self.healthy = True
+            self.needs_reconnect = False
+            self.needs_stream_switch = False
+            self.last_health_action_time = 0
+            self.buffering = False
+            self.buffering_start_time = None
+            self.failover_started_at = None
+            self.force_ffmpeg = False
+            self.ffmpeg_input_phase = True
+
             # Reset bitrate EMA on every URL change so stale data never carries over
             self._smoothed_output_bitrate = None
             self._last_bitrate_db_save_time = 0
@@ -1583,6 +1632,15 @@ class StreamManager:
 
         while self.running:
             try:
+                if (
+                    self.url_switching
+                    or self.failover_started_at is not None
+                    or self.pending_buffering_failover_duration is not None
+                ):
+                    consecutive_unhealthy_checks = 0
+                    gevent.sleep(self.health_check_interval)
+                    continue
+
                 now = time.time()
                 inactivity_duration = now - self.last_data_time
                 timeout_threshold = self._health_inactivity_threshold()
@@ -1705,6 +1763,8 @@ class StreamManager:
         self.tried_stream_ids = set()
         self._failover_rotation_passes = 0
         self._rotation_cooldown_until = None
+        self.failover_started_at = None
+        self.pending_buffering_failover_duration = None
 
     def _close_connection(self):
         """Close HTTP connection resources"""
@@ -1829,6 +1889,14 @@ class StreamManager:
             # Set timeout for chunk reads
             chunk_timeout = ConfigHelper.chunk_timeout()  # Use centralized timeout configuration
 
+            if self.failover_started_at is not None:
+                remaining = self.buffering_timeout - (
+                    time.monotonic() - self.failover_started_at
+                )
+                if remaining <= 0:
+                    return False
+                chunk_timeout = min(chunk_timeout, remaining)
+
             try:
                 # Handle different socket types with timeout
                 if hasattr(self.socket, 'recv'):
@@ -1849,15 +1917,34 @@ class StreamManager:
                         self.connected = False
                         return False
 
-                    try:
-                        ready, _, _ = _select.select([fd], [], [], chunk_timeout)
-                    except (ValueError, OSError):
-                        self.connected = False
-                        return False
+                    deadline = time.monotonic() + chunk_timeout
+                    while True:
+                        if (
+                            not self.running
+                            or self.stop_requested
+                            or self.needs_stream_switch
+                            or self.needs_reconnect
+                        ):
+                            return False
 
-                    if not ready:
-                        logger.debug(f"Chunk read timeout ({chunk_timeout}s) for channel {self.channel_id}")
-                        return False
+                        remaining = deadline - time.monotonic()
+                        if remaining <= 0:
+                            logger.debug(
+                                f"Chunk read timeout ({chunk_timeout}s) "
+                                f"for channel {self.channel_id}"
+                            )
+                            return False
+
+                        try:
+                            ready, _, _ = _select.select(
+                                [fd], [], [], min(0.25, remaining)
+                            )
+                        except (ValueError, OSError):
+                            self.connected = False
+                            return False
+
+                        if ready:
+                            break
 
                     try:
                         chunk = _os.read(fd, Config.CHUNK_SIZE)
@@ -1897,7 +1984,7 @@ class StreamManager:
                 last_data_key = RedisKeys.last_data(self.buffer.channel_id)
                 self.buffer.redis_client.set(last_data_key, str(time.time()), ex=60)
 
-            return True
+            return success
 
         except (socket.timeout, socket.error) as e:
             # Socket error
@@ -2135,6 +2222,9 @@ class StreamManager:
                 if not switch_result:
                     logger.error(f"Failed to update URL for stream ID {stream_id} for channel {self.channel_id}")
                     continue  # Try next stream
+
+                # The replacement is not accepted until it actually produces data.
+                self.failover_started_at = time.monotonic()
 
                 # Update stream ID tracking
                 self.current_stream_id = stream_id
