@@ -1,5 +1,5 @@
 name: Temporary Full Repository Test Suite
-run-name: Full suite — V5.4 (26255244)
+run-name: Full suite — V5.4 (d0f62b1d)
 
 on:
   push:
@@ -33,12 +33,12 @@ jobs:
       - name: Checkout V5.4
         uses: actions/checkout@v6
         with:
-          ref: 262552442c99408444af9657175f06e0fd3cfe3f
+          ref: d0f62b1d9ef1debc857a942be90a99a3c61d2a1e
       - name: Verify tested commit
         working-directory: ${{ github.workspace }}
         run: |
-          test "$(git -c safe.directory="$PWD" rev-parse HEAD)" = "262552442c99408444af9657175f06e0fd3cfe3f"
-          echo 'Tested feature commit: `262552442c99408444af9657175f06e0fd3cfe3f`' >> "$GITHUB_STEP_SUMMARY"
+          test "$(git -c safe.directory="$PWD" rev-parse HEAD)" = "d0f62b1d9ef1debc857a942be90a99a3c61d2a1e"
+          echo 'Tested feature commit: `d0f62b1d9ef1debc857a942be90a99a3c61d2a1e`' >> "$GITHUB_STEP_SUMMARY"
       - name: Run complete backend suite
         env:
           GITHUB_WORKSPACE: ${{ github.workspace }}
@@ -54,12 +54,12 @@ jobs:
       - name: Checkout V5.4
         uses: actions/checkout@v6
         with:
-          ref: 262552442c99408444af9657175f06e0fd3cfe3f
+          ref: d0f62b1d9ef1debc857a942be90a99a3c61d2a1e
       - name: Verify tested commit
         working-directory: ${{ github.workspace }}
         run: |
-          test "$(git rev-parse HEAD)" = "262552442c99408444af9657175f06e0fd3cfe3f"
-          echo 'Tested feature commit: `262552442c99408444af9657175f06e0fd3cfe3f`' >> "$GITHUB_STEP_SUMMARY"
+          test "$(git rev-parse HEAD)" = "d0f62b1d9ef1debc857a942be90a99a3c61d2a1e"
+          echo 'Tested feature commit: `d0f62b1d9ef1debc857a942be90a99a3c61d2a1e`' >> "$GITHUB_STEP_SUMMARY"
       - name: Setup Node.js
         uses: actions/setup-node@v4
         with:

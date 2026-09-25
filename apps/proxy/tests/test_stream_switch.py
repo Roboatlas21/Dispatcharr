@@ -6,6 +6,7 @@ from unittest.mock import MagicMock, patch
 from django.test import TestCase
 
 from apps.proxy.live_proxy.constants import ChannelMetadataField
+from apps.proxy.live_proxy.input.manager import StreamManager
 from apps.proxy.live_proxy.redis_keys import RedisKeys
 from apps.proxy.live_proxy.services import channel_service as cs_module
 from apps.proxy.live_proxy.services.channel_service import ChannelService
@@ -78,13 +79,23 @@ class OwnerPathTests(TestCase):
         redis = FakeRedis()
         proxy = make_proxy_server(redis, owner=True)
 
-        manager = MagicMock()
-        manager.url = manager_url
-        manager.update_url.return_value = True
+        def commit_metadata(metadata):
+            redis.hset(RedisKeys.channel_metadata(CHANNEL_ID), mapping=metadata)
+            return True
+
+        authority = MagicMock()
+        authority.commit.side_effect = commit_metadata
+        manager = StreamManager(
+            CHANNEL_ID, manager_url, MagicMock(published_index=0, redis_client=None),
+            user_agent="test-agent", stream_id=144065 if manager_url == NEW_URL else 296622,
+            m3u_profile_id=7, stream_name="Alt Feed", channel_name="Test", source_authority=authority,
+        )
         proxy.stream_managers[CHANNEL_ID] = manager
 
         with patch.object(cs_module.ProxyServer, "get_instance", return_value=proxy), \
-             patch("django.db.close_old_connections"):
+             patch("core.utils.RedisClient.get_client", return_value=redis), \
+             patch("apps.proxy.live_proxy.input.manager.Channel.objects.get", return_value=MagicMock(id=1)), \
+             patch("apps.proxy.live_proxy.input.manager.log_system_event"):
             result = ChannelService.change_stream_url(
                 CHANNEL_ID, NEW_URL, "test-agent",
                 target_stream_id=144065, m3u_profile_id=7,
@@ -95,10 +106,12 @@ class OwnerPathTests(TestCase):
     def test_owner_switch_persists_stream_id_metadata(self):
         result, redis, manager = self._run()
 
-        manager.update_url.assert_called_once_with(NEW_URL, 144065, 7)
-        manager.reset_failover_rotation_state.assert_called_once()
+        manager.buffer.reset_buffer_position.assert_called_once()
+        manager.source_authority.commit.assert_called_once()
+        self.assertEqual(manager.tried_stream_ids, set())
         self.assertTrue(result["success"])
         self.assertTrue(result["direct_update"])
+        self.assertIs(result["metadata_updated"], True)
 
         metadata = redis.hashes[RedisKeys.channel_metadata(CHANNEL_ID)]
         self.assertEqual(metadata[ChannelMetadataField.URL], NEW_URL)
@@ -109,8 +122,10 @@ class OwnerPathTests(TestCase):
     def test_owner_same_url_is_success_and_repairs_metadata(self):
         result, redis, manager = self._run(manager_url=NEW_URL)
 
-        manager.update_url.assert_not_called()
+        manager.buffer.reset_buffer_position.assert_not_called()
+        manager.source_authority.commit.assert_called_once()
         self.assertTrue(result["success"])
+        self.assertIs(result["metadata_updated"], True)
 
         metadata = redis.hashes[RedisKeys.channel_metadata(CHANNEL_ID)]
         self.assertEqual(metadata[ChannelMetadataField.STREAM_ID], "144065")
