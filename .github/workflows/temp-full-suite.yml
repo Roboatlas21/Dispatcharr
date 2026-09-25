@@ -26,6 +26,10 @@ jobs:
       DISPATCHARR_LOG_LEVEL: WARNING
       SYNC_PYTHON_DEPS: "false"
     steps:
+      - name: Install Git for commit verification
+        run: |
+          apt-get update -qq
+          apt-get install -y --no-install-recommends git
       - name: Checkout V5.4
         uses: actions/checkout@v6
         with:
