@@ -37,7 +37,7 @@ jobs:
       - name: Verify tested commit
         working-directory: ${{ github.workspace }}
         run: |
-          test "$(git rev-parse HEAD)" = "262552442c99408444af9657175f06e0fd3cfe3f"
+          test "$(git -c safe.directory="$PWD" rev-parse HEAD)" = "262552442c99408444af9657175f06e0fd3cfe3f"
           echo 'Tested feature commit: `262552442c99408444af9657175f06e0fd3cfe3f`' >> "$GITHUB_STEP_SUMMARY"
       - name: Run complete backend suite
         env:
