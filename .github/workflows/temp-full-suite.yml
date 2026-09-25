@@ -1,0 +1,68 @@
+name: Temporary Full Repository Test Suite
+run-name: Full suite — V5.4 (26255244)
+
+on:
+  push:
+    branches:
+      - ci/full-suite-pr-v54-2625524
+
+permissions:
+  contents: read
+  packages: read
+
+jobs:
+  backend:
+    name: Full backend suite
+    runs-on: ubuntu-latest
+    container:
+      image: ghcr.io/dispatcharr/dispatcharr:base-dev
+      options: --entrypoint ""
+    env:
+      DISPATCHARR_ENV: aio
+      DJANGO_SECRET_KEY: ci-test-secret-key
+      POSTGRES_DB: dispatcharr
+      POSTGRES_USER: dispatch
+      POSTGRES_PASSWORD: secret
+      DISPATCHARR_LOG_LEVEL: WARNING
+      SYNC_PYTHON_DEPS: "false"
+    steps:
+      - name: Checkout V5.4
+        uses: actions/checkout@v6
+        with:
+          ref: 262552442c99408444af9657175f06e0fd3cfe3f
+      - name: Verify tested commit
+        working-directory: ${{ github.workspace }}
+        run: |
+          test "$(git rev-parse HEAD)" = "262552442c99408444af9657175f06e0fd3cfe3f"
+          echo 'Tested feature commit: `262552442c99408444af9657175f06e0fd3cfe3f`' >> "$GITHUB_STEP_SUMMARY"
+      - name: Run complete backend suite
+        env:
+          GITHUB_WORKSPACE: ${{ github.workspace }}
+        run: bash scripts/ci_bootstrap_backend.sh -v2
+
+  frontend:
+    name: Full frontend suite
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: ./frontend
+    steps:
+      - name: Checkout V5.4
+        uses: actions/checkout@v6
+        with:
+          ref: 262552442c99408444af9657175f06e0fd3cfe3f
+      - name: Verify tested commit
+        working-directory: ${{ github.workspace }}
+        run: |
+          test "$(git rev-parse HEAD)" = "262552442c99408444af9657175f06e0fd3cfe3f"
+          echo 'Tested feature commit: `262552442c99408444af9657175f06e0fd3cfe3f`' >> "$GITHUB_STEP_SUMMARY"
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '24'
+          cache: 'npm'
+          cache-dependency-path: './frontend/package-lock.json'
+      - name: Install dependencies
+        run: npm ci
+      - name: Run complete frontend suite
+        run: npm test
