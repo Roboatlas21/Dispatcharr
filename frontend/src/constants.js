@@ -58,6 +58,30 @@ export const PROXY_SETTINGS_OPTIONS = {
     description:
       'Maximum seconds to wait for the initial buffer to fill while a channel is connecting. Channels that never receive enough buffered data are stopped after this limit.',
   },
+  failover_init_grace_period: {
+    label: 'Failover Initialization Timeout',
+    advanced: true,
+    description:
+      'Maximum seconds (1–300) for a newly selected backup stream to publish its first chunk to the client buffer. Partial incoming data does not end this timeout. Increase this for slow-starting or low-bitrate streams.',
+  },
+  upstream_read_timeout: {
+    label: 'Upstream Read Timeout',
+    advanced: true,
+    description:
+      'Maximum seconds FFmpeg will wait when no new data is arriving from an HTTP/HTTPS provider. Applies only when FFmpeg is reading the stream. Set to 0 to disable.',
+  },
+  stream_connection_attempts: {
+    label: 'Connection Attempts per Stream',
+    advanced: true,
+    description:
+      'Number of connection attempts for the preferred stream, or for a stream that was already working. New backup streams are tried once before moving to the next one.',
+  },
+  min_failover_rotation_interval: {
+    label: 'Minimum Failover Rotation Interval',
+    advanced: true,
+    description:
+      'Minimum seconds before starting over from the first stream after all available streams have been tried. Time spent trying streams counts toward this interval. Set to 0 to retry immediately.',
+  },
   channel_client_wait_period: {
     label: 'Client Connect Grace Period',
     advanced: true,

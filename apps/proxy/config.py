@@ -54,6 +54,10 @@ class BaseConfig:
                 "redis_chunk_ttl": 60,
                 "channel_shutdown_delay": 0,
                 "channel_init_grace_period": 60,
+                "failover_init_grace_period": 30,
+                "upstream_read_timeout": 10,
+                "stream_connection_attempts": 3,
+                "min_failover_rotation_interval": 10,
                 "channel_client_wait_period": 5,
                 "new_client_behind_seconds": 5,
                 "validate_redirect_urls": True,
@@ -149,6 +153,37 @@ class TSConfig(BaseConfig):
         """Max seconds to wait for initial buffer fill during channel startup."""
         settings = cls.get_proxy_settings()
         return settings.get("channel_init_grace_period", 60)
+
+    @classmethod
+    def get_failover_init_grace_period(cls):
+        """Max seconds for a replacement to publish a chunk to the buffer."""
+        return cls._get_failover_integer("failover_init_grace_period", 30, 1, 300)
+
+    @classmethod
+    def get_upstream_read_timeout(cls):
+        """Max seconds an HTTP/HTTPS FFmpeg input may go without network data."""
+        return cls._get_failover_integer("upstream_read_timeout", 10, 0, 300)
+
+    @classmethod
+    def _get_failover_integer(cls, key, default, minimum, maximum):
+        """Tolerate invalid values saved by older versions of the settings API."""
+        settings = cls.get_proxy_settings()
+        if not isinstance(settings, dict):
+            return default
+        value = settings.get(key, default)
+        if type(value) is int and minimum <= value <= maximum:
+            return value
+        return default
+
+    @classmethod
+    def get_stream_connection_attempts(cls):
+        """Total manager attempts for a primary or established stream."""
+        return cls._get_failover_integer("stream_connection_attempts", 3, 1, 5)
+
+    @classmethod
+    def get_min_failover_rotation_interval(cls):
+        """Minimum seconds between the starts of complete source passes."""
+        return cls._get_failover_integer("min_failover_rotation_interval", 10, 0, 300)
 
     @classmethod
     def get_channel_client_wait_period(cls):

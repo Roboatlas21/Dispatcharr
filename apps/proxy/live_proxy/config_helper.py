@@ -72,8 +72,8 @@ class ConfigHelper:
 
     @staticmethod
     def max_retries():
-        """Get maximum retry attempts"""
-        return ConfigHelper.get('MAX_RETRIES', 3)
+        """Get manager-level connection attempts per primary/established stream."""
+        return Config.get_stream_connection_attempts()
 
     @staticmethod
     def retry_window_seconds():
@@ -94,6 +94,11 @@ class ConfigHelper:
     def failover_rotation_cooldown():
         """Seconds to wait after exhausting all streams before wrapping rotation."""
         return ConfigHelper.get('FAILOVER_ROTATION_COOLDOWN', 60)
+
+    @staticmethod
+    def min_failover_rotation_interval():
+        """Minimum start-to-start interval between complete source passes."""
+        return Config.get_min_failover_rotation_interval()
 
     @staticmethod
     def retry_wait_interval():
@@ -124,6 +129,16 @@ class ConfigHelper:
     def channel_init_grace_period():
         """Max seconds to wait for initial buffer fill during channel startup."""
         return Config.get_channel_init_grace_period()
+
+    @staticmethod
+    def failover_init_grace_period():
+        """Max seconds for a replacement to publish a chunk to the buffer."""
+        return Config.get_failover_init_grace_period()
+
+    @staticmethod
+    def upstream_read_timeout():
+        """Max seconds an HTTP/HTTPS FFmpeg input may go without network data."""
+        return Config.get_upstream_read_timeout()
 
     @staticmethod
     def channel_client_wait_period():

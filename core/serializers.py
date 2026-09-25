@@ -10,7 +10,7 @@ from dispatcharr.log_collector import (
     MAX_LOG_KEEP,
     MAX_LOG_MB,
 )
-from .models import CoreSettings, UserAgent, StreamProfile, OutputProfile, DVR_SETTINGS_KEY, NETWORK_ACCESS_KEY, SYSTEM_SETTINGS_KEY
+from .models import CoreSettings, UserAgent, StreamProfile, OutputProfile, DVR_SETTINGS_KEY, NETWORK_ACCESS_KEY, SYSTEM_SETTINGS_KEY, PROXY_SETTINGS_KEY
 
 
 def _clamp_int(value, default, lo, hi):
@@ -59,6 +59,24 @@ class CoreSettingsSerializer(serializers.ModelSerializer):
     class Meta:
         model = CoreSettings
         fields = "__all__"
+
+    def validate(self, attrs):
+        attrs = super().validate(attrs)
+        key = attrs.get("key", getattr(self.instance, "key", None))
+        if key == PROXY_SETTINGS_KEY and "value" in attrs:
+            value = attrs["value"]
+            if not isinstance(value, dict):
+                raise serializers.ValidationError({"value": {
+                    "non_field_errors": ["Proxy settings must be a JSON object."],
+                }})
+            controls = ("failover_init_grace_period", "upstream_read_timeout",
+                        "stream_connection_attempts", "min_failover_rotation_interval")
+            serializer = ProxySettingsSerializer(
+                data={key: value[key] for key in controls if key in value}, partial=True,
+            )
+            if not serializer.is_valid():
+                raise serializers.ValidationError({"value": serializer.errors})
+        return attrs
 
     def update(self, instance, validated_data):
         if instance.key == NETWORK_ACCESS_KEY:
@@ -120,6 +138,13 @@ class CoreSettingsSerializer(serializers.ModelSerializer):
 
         return result
 
+class StrictProxyIntegerField(serializers.IntegerField):
+    def to_internal_value(self, data):
+        if type(data) is not int:
+            self.fail("invalid")
+        return super().to_internal_value(data)
+
+
 class ProxySettingsSerializer(serializers.Serializer):
     """Serializer for proxy settings stored as JSON in CoreSettings"""
     buffering_timeout = serializers.IntegerField(min_value=0, max_value=300)
@@ -127,6 +152,10 @@ class ProxySettingsSerializer(serializers.Serializer):
     redis_chunk_ttl = serializers.IntegerField(min_value=10, max_value=3600)
     channel_shutdown_delay = serializers.IntegerField(min_value=0, max_value=300)
     channel_init_grace_period = serializers.IntegerField(min_value=0, max_value=300)
+    failover_init_grace_period = StrictProxyIntegerField(min_value=1, max_value=300, required=False, default=30)
+    upstream_read_timeout = StrictProxyIntegerField(min_value=0, max_value=300, required=False, default=10)
+    stream_connection_attempts = StrictProxyIntegerField(min_value=1, max_value=5, required=False, default=3)
+    min_failover_rotation_interval = StrictProxyIntegerField(min_value=0, max_value=300, required=False, default=10)
     channel_client_wait_period = serializers.IntegerField(min_value=0, max_value=300, required=False, default=5)
     new_client_behind_seconds = serializers.IntegerField(min_value=0, max_value=120, required=False, default=5)
     validate_redirect_urls = serializers.BooleanField(required=False, default=True)

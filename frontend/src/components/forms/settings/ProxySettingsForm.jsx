@@ -16,6 +16,8 @@ import {
 import { ChevronDown, ChevronRight } from 'lucide-react';
 import { PROXY_SETTINGS_OPTIONS } from '../../../constants.js';
 import {
+  FAILOVER_SETTING_LIMITS,
+  getFailoverSettingsValidation,
   getProxySettingDefaults,
   getProxySettingsFormInitialValues,
 } from '../../../utils/forms/settings/ProxySettingsFormUtils.js';
@@ -26,6 +28,10 @@ const isNumericField = (key) => {
     'redis_chunk_ttl',
     'channel_shutdown_delay',
     'channel_init_grace_period',
+    'failover_init_grace_period',
+    'upstream_read_timeout',
+    'stream_connection_attempts',
+    'min_failover_rotation_interval',
     'channel_client_wait_period',
     'new_client_behind_seconds',
   ].includes(key);
@@ -36,6 +42,7 @@ const isFloatField = (key) => key === 'buffering_speed';
 const isBooleanField = (_key, config) => config?.type === 'boolean';
 
 const getNumericFieldMax = (key) => {
+  if (key === 'stream_connection_attempts') return 5;
   if (key === 'buffering_timeout') return 300;
   if (key === 'redis_chunk_ttl') return 3600;
   if (key === 'channel_shutdown_delay') return 300;
@@ -63,8 +70,10 @@ const renderProxySettingField = (key, config, proxySettingsForm) => {
         label={config.label}
         {...proxySettingsForm.getInputProps(key)}
         description={config.description || null}
-        min={0}
+        min={FAILOVER_SETTING_LIMITS[key]?.[0] ?? 0}
         max={getNumericFieldMax(key)}
+        allowDecimal={!Object.hasOwn(FAILOVER_SETTING_LIMITS, key)}
+        step={1}
       />
     );
   }
@@ -146,6 +155,7 @@ const ProxySettingsForm = React.memo(({ active }) => {
   const proxySettingsForm = useForm({
     mode: 'controlled',
     initialValues: getProxySettingsFormInitialValues(),
+    validate: getFailoverSettingsValidation(),
   });
 
   useEffect(() => {
