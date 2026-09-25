@@ -24,6 +24,7 @@ from .input.buffer import StreamBuffer
 from .client_manager import ClientManager
 from .output.fmp4.manager import FMP4RemuxManager
 from .output.profile.manager import OutputProfileManager, PROFILE_STATE_ACTIVE
+from .source_authority import SourceAuthority
 from .redis_keys import RedisKeys
 from .constants import ChannelState, EventType, StreamType, ChannelMetadataField, REDIS_TTL_DEFAULT
 from .config_helper import ConfigHelper
@@ -250,27 +251,13 @@ class ProxyServer:
                                                 self.redis_client.setex(status_key, 60, "switching")
 
                                             stream_manager = self.stream_managers[channel_id]
-                                            if new_url == stream_manager.url:
-                                                # update_url() returns False for same URL; still success so metadata refreshes
-                                                logger.info(f"Channel {channel_id} already using requested URL, refreshing metadata only")
-                                                success = True
-                                            else:
-                                                success = stream_manager.update_url(new_url, event_stream_id, event_m3u_profile_id)
+                                            success = stream_manager.update_url(
+                                                new_url, event_stream_id, event_m3u_profile_id,
+                                                user_agent=user_agent, stream_name=event_stream_name, manual=True,
+                                            ) is True
 
                                             if success:
-                                                stream_manager.reset_failover_rotation_state()
                                                 logger.info(f"Stream switch initiated for channel {channel_id}")
-
-                                                if self.redis_client:
-                                                    try:
-                                                        from .services.channel_service import ChannelService
-                                                        ChannelService._update_channel_metadata(
-                                                            channel_id, new_url, user_agent,
-                                                            event_stream_id, event_m3u_profile_id,
-                                                            event_stream_name,
-                                                        )
-                                                    except Exception as e:
-                                                        logger.error(f"Error updating switch metadata for channel {channel_id}: {e}", exc_info=True)
 
                                                 # Publish confirmation
                                                 switch_result = {
@@ -289,14 +276,6 @@ class ProxyServer:
                                                     self.redis_client.setex(status_key, 60, "switched")
                                             else:
                                                 logger.error(f"Failed to switch stream for channel {channel_id}")
-
-                                                # Roll back the URL in metadata to what the manager will
-                                                # actually reconnect to. The non-owner may have pre-written
-                                                # the desired URL; use stream_manager.url (the ground truth)
-                                                # so Redis is consistent with the live stream.
-                                                if self.redis_client:
-                                                    metadata_key = RedisKeys.channel_metadata(channel_id)
-                                                    self.redis_client.hset(metadata_key, "url", stream_manager.url)
 
                                                 # Publish failure
                                                 switch_result = {
@@ -567,6 +546,7 @@ class ProxyServer:
         stream_id=None,
         channel_name=None,
         stream_name=None,
+        m3u_profile_id=None, stream_profile=None,
     ):
         """Initialize a channel without redundant active key"""
         try:
@@ -576,12 +556,6 @@ class ProxyServer:
                     f"teardown or pending shutdown active"
                 )
                 return False
-
-            if self._has_local_upstream_activity(channel_id):
-                logger.warning(
-                    f"Stopping lingering local upstream before initializing channel {channel_id}"
-                )
-                self._stop_local_stream_activity(channel_id)
 
             if self.redis_client:
                 metadata_key = RedisKeys.channel_metadata(channel_id)
@@ -603,6 +577,12 @@ class ProxyServer:
                                     worker_id=self.worker_id
                                 )
                             return True
+
+            if self._has_local_upstream_activity(channel_id):
+                logger.warning(
+                    f"Stopping lingering local upstream before initializing channel {channel_id}"
+                )
+                self._stop_local_stream_activity(channel_id)
 
             # Create buffer and client manager instances (or reuse if they exist)
             if channel_id not in self.stream_buffers:
@@ -725,6 +705,7 @@ class ProxyServer:
                 except Exception:
                     pass
 
+            authority = None
             if self.redis_client:
                 # Write initializing metadata only after ownership is held
                 metadata = {
@@ -734,7 +715,7 @@ class ProxyServer:
                     "owner": self.worker_id,
                     "state": ChannelState.INITIALIZING  # Use constant instead of string literal
                 }
-                if channel_user_agent:
+                if channel_user_agent is not None:
                     metadata["user_agent"] = channel_user_agent
 
                 # Make sure stream_id is always set in metadata and properly logged
@@ -750,11 +731,18 @@ class ProxyServer:
                 if stream_name:
                     metadata[ChannelMetadataField.STREAM_NAME] = stream_name
 
-                # Set channel metadata BEFORE creating the StreamManager
-                self.redis_client.hset(metadata_key, mapping=metadata)
-                # Always set a TTL so a missed failure path cannot leave immortal
-                # metadata. Active channels keep refreshing this via the registry.
-                self.redis_client.expire(metadata_key, REDIS_TTL_DEFAULT)
+                if m3u_profile_id is not None:
+                    metadata[ChannelMetadataField.M3U_PROFILE] = str(m3u_profile_id)
+                if stream_profile is not None:
+                    metadata[ChannelMetadataField.STREAM_PROFILE] = stream_profile
+                authority = SourceAuthority(self.redis_client, channel_id, self.worker_id)
+                if not authority.initialize(metadata):
+                    # A rejected INIT must not clean another runtime's Redis state.
+                    self._stop_local_stream_activity(channel_id)
+                    self.stream_buffers.pop(channel_id, None)
+                    self.client_managers.pop(channel_id, None)
+                    self._channel_names.pop(channel_id, None)
+                    return False
 
                 # Verify the stream_id was set correctly in Redis
                 stream_id_value = self.redis_client.hget(metadata_key, "stream_id")
@@ -778,6 +766,8 @@ class ProxyServer:
                 stream_id=channel_stream_id,  # Pass stream ID to the manager
                 worker_id=self.worker_id,  # Pass worker_id explicitly to eliminate circular dependency
                 channel_name=channel_name,
+                source_authority=authority, m3u_profile_id=m3u_profile_id,
+                stream_name=stream_name, stream_profile=stream_profile,
             )
             logger.info(f"Created StreamManager for channel {channel_id} with stream ID {channel_stream_id}")
             self.stream_managers[channel_id] = stream_manager

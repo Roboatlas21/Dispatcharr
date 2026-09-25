@@ -38,6 +38,10 @@ class StreamBuffer:
             except Exception as e:
                 logger.error(f"Error initializing buffer from Redis: {e}")
 
+        # Write-only high-water mark for chunks published by add_chunk().
+        # self.index can also move on client reads, so it cannot prove that a
+        # replacement source has produced new client-visible output.
+        self.published_index = self.index
         self._write_buffer = bytearray()
         self.target_chunk_size = ConfigHelper.get('BUFFER_CHUNK_SIZE', TS_PACKET_SIZE * 5644)  # ~1MB default
 
@@ -119,6 +123,7 @@ class StreamBuffer:
 
                         # Update local tracking
                         self.index = chunk_index
+                        self.published_index = chunk_index
                         writes_done += 1
 
             if writes_done > 0:

@@ -91,11 +91,6 @@ class ConfigHelper:
         return ConfigHelper.get('MAX_STREAM_SWITCHES', 10)
 
     @staticmethod
-    def failover_rotation_cooldown():
-        """Seconds to wait after exhausting all streams before wrapping rotation."""
-        return ConfigHelper.get('FAILOVER_ROTATION_COOLDOWN', 60)
-
-    @staticmethod
     def min_failover_rotation_interval():
         """Minimum start-to-start interval between complete source passes."""
         return Config.get_min_failover_rotation_interval()
