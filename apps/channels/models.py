@@ -948,12 +948,13 @@ class Channel(models.Model):
 
         return True
 
-    def update_stream_profile(self, new_profile_id):
+    def update_stream_profile(self, new_profile_id, new_stream_id=None):
         """
         Updates the profile for the current stream and adjusts connection counts.
 
         Args:
             new_profile_id: The ID of the new stream profile to use
+            new_stream_id: Optional replacement stream ID
 
         Returns:
             bool: True if successful, False otherwise
@@ -967,6 +968,7 @@ class Channel(models.Model):
             return False
 
         stream_id = int(stream_id_bytes)
+        target_stream_id = int(new_stream_id) if new_stream_id is not None else stream_id
 
         # Get current profile ID
         current_profile_id_bytes = redis_client.get(f"stream_profile:{stream_id}")
@@ -976,8 +978,20 @@ class Channel(models.Model):
 
         current_profile_id = int(current_profile_id_bytes)
 
-        # Don't do anything if the profile is already set to the requested one
+        # Switching streams on the same provider/profile reuses this channel's
+        # existing capacity slot; only move the Redis assignment keys.
         if current_profile_id == new_profile_id:
+            if target_stream_id != stream_id:
+                pipe = redis_client.pipeline()
+                pipe.delete(f"stream_profile:{stream_id}")
+                pipe.set(f"channel_stream:{self.id}", target_stream_id)
+                pipe.set(f"stream_profile:{target_stream_id}", new_profile_id)
+                pipe.execute()
+                logger.info(
+                    f"Moved channel {self.uuid} stream assignment from "
+                    f"{stream_id} to {target_stream_id} on profile "
+                    f"{new_profile_id}"
+                )
             return True
 
         from apps.m3u.connection_pool import (
@@ -993,28 +1007,47 @@ class Channel(models.Model):
             "m3u_account__server_group"
         ).get(id=new_profile_id)
 
+        # Atomically claim the target profile slot (INCR-first), so a capacity
+        # race after discovery cannot overbook the provider.
+        new_profile_connections_key = profile_connections_key(new_profile_id)
+        if new_profile.max_streams > 0:
+            new_count = redis_client.incr(new_profile_connections_key)
+            if new_count > new_profile.max_streams:
+                redis_client.decr(new_profile_connections_key)
+                logger.warning(
+                    f"Profile {new_profile_id} reached max connections during "
+                    f"stream switch ({new_count - 1}/{new_profile.max_streams})"
+                )
+                return False
+
+        # Reuse the held pool slot, or reserve the destination pool first.
+        # A full destination leaves the old reservation intact.
         if not move_credential_slot_on_profile_switch(
             old_profile, new_profile, redis_client
         ):
+            if new_profile.max_streams > 0:
+                redis_client.decr(new_profile_connections_key)
             logger.warning(
                 "Shared login pool full for profile %s during stream profile switch",
                 new_profile_id,
             )
             return False
 
-        # Profile counters always move on switch; credential totals move only when login changes.
         old_profile_connections_key = profile_connections_key(current_profile_id)
-        new_profile_connections_key = profile_connections_key(new_profile_id)
         old_count = int(redis_client.get(old_profile_connections_key) or 0)
 
+        # Commit the stream/profile assignment together. The target profile slot
+        # is already reserved at this point.
         pipe = redis_client.pipeline()
         if old_count > 0:
             pipe.decr(old_profile_connections_key)
-        pipe.set(f"stream_profile:{stream_id}", new_profile_id)
-        pipe.incr(new_profile_connections_key)
+        if target_stream_id != stream_id:
+            pipe.delete(f"stream_profile:{stream_id}")
+            pipe.set(f"channel_stream:{self.id}", target_stream_id)
+        pipe.set(f"stream_profile:{target_stream_id}", new_profile_id)
         pipe.execute()
         logger.info(
-            f"Updated stream {stream_id} profile from {current_profile_id} to {new_profile_id}"
+            f"Updated stream {target_stream_id} profile from {current_profile_id} to {new_profile_id}"
         )
         return True
 

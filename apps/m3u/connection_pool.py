@@ -206,33 +206,28 @@ def move_credential_slot_on_profile_switch(
     old_profile, new_profile, redis_client
 ) -> bool:
     """
-    Move the shared credential counter when switching to a different provider login.
+    Reuse the held pool slot, or reserve the destination before releasing it.
 
     Profile counters are managed separately by Channel.update_stream_profile().
     Returns False when the new profile's credential pool is full.
     """
-    old_fp = get_profile_credential_fingerprint(old_profile)
-    new_fp = get_profile_credential_fingerprint(new_profile)
-    if old_fp == new_fp:
-        return True
-
-    _release_credential_slot_by_profile_id(old_profile.id, redis_client)
+    old_key = None
+    if get_profile_connection_count(old_profile, redis_client) > 0:
+        old_key = redis_client.get(profile_credential_release_key(old_profile.id))
+        if isinstance(old_key, bytes):
+            old_key = old_key.decode()
 
     cred_reserved, cred_key = _reserve_server_group_slot_for_profile(
-        new_profile, redis_client
+        new_profile, redis_client, reuse_key=old_key
     )
     if not cred_reserved:
-        restore_reserved, restore_key = _reserve_server_group_slot_for_profile(
-            old_profile, redis_client
-        )
-        if restore_reserved and restore_key:
-            _remember_credential_release_key(
-                old_profile.id, restore_key, redis_client
-            )
-        return False
+        return False  # The old slot and its release binding are still intact.
 
-    if cred_key:
-        _remember_credential_release_key(new_profile.id, cred_key, redis_client)
+    if old_key and old_key != cred_key:
+        _safe_decr(redis_client, old_key)
+    _remember_credential_release_key(new_profile.id, cred_key, redis_client)
+    # Keep the old binding: other reservations (including one arriving during
+    # this switch) may still need it. Zero profile counts guard later releases.
     return True
 
 
@@ -246,9 +241,11 @@ def _safe_decr(redis_client, key: str) -> None:
 
 
 def _remember_credential_release_key(
-    profile_id: int, cred_key: str, redis_client
+    profile_id: int, cred_key: Optional[str], redis_client
 ) -> None:
-    redis_client.set(profile_credential_release_key(profile_id), cred_key)
+    # A binding belongs to the profile, not one connection. Retain it at zero
+    # usage; successful reservations refresh it, including an unpooled marker.
+    redis_client.set(profile_credential_release_key(profile_id), cred_key or "")
 
 
 def _release_credential_slot_by_profile_id(profile_id: int, redis_client) -> bool:
@@ -261,12 +258,11 @@ def _release_credential_slot_by_profile_id(profile_id: int, redis_client) -> boo
     if isinstance(cred_key, bytes):
         cred_key = cred_key.decode()
     _safe_decr(redis_client, cred_key)
-    redis_client.delete(release_key)
     return True
 
 
 def _reserve_server_group_slot_for_profile(
-    profile, redis_client
+    profile, redis_client, *, reuse_key=None
 ) -> Tuple[bool, Optional[str]]:
     group = get_enforced_server_group_for_profile(profile)
     if not group or profile.max_streams == 0:
@@ -275,6 +271,9 @@ def _reserve_server_group_slot_for_profile(
     cred_key = _credential_counter_key(profile, group)
     if not cred_key:
         return False, None
+
+    if cred_key == reuse_key:
+        return True, cred_key
 
     cred_count = redis_client.incr(cred_key)
     if cred_count <= profile.max_streams:
@@ -288,7 +287,7 @@ def reserve_profile_slot(
     profile, redis_client
 ) -> Tuple[bool, int, Optional[ReserveFailureReason]]:
     """
-    Atomically reserve profile + optional credential slots (INCR-first).
+    Reserve bounded profile + optional credential slots (INCR-first).
 
     Returns (reserved, profile_count_after_attempt, failure_reason).
     failure_reason is set when reserved is False.
@@ -314,17 +313,14 @@ def reserve_profile_slot(
             "credential_full",
         )
 
-    if cred_key:
-        _remember_credential_release_key(profile.id, cred_key, redis_client)
-
+    _remember_credential_release_key(profile.id, cred_key, redis_client)
     return True, profile_count, None
 
 
 def release_profile_slot(profile_id: int, redis_client) -> None:
     """Release profile and shared credential slots after a stream end."""
-    _release_credential_slot_by_profile_id(profile_id, redis_client)
-
     profile_key = profile_connections_key(profile_id)
     current = int(redis_client.get(profile_key) or 0)
     if current > 0:
+        _release_credential_slot_by_profile_id(profile_id, redis_client)
         redis_client.decr(profile_key)
