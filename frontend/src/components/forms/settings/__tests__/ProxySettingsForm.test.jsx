@@ -40,10 +40,14 @@ vi.mock('../../../../utils/pages/SettingsUtils.js', () => ({
   updateSetting: vi.fn(),
 }));
 
-vi.mock('../../../../utils/forms/settings/ProxySettingsFormUtils.js', () => ({
-  getProxySettingsFormInitialValues: vi.fn(),
-  getProxySettingDefaults: vi.fn(),
-}));
+vi.mock(
+  '../../../../utils/forms/settings/ProxySettingsFormUtils.js',
+  async (importOriginal) => ({
+    ...(await importOriginal()),
+    getProxySettingsFormInitialValues: vi.fn(),
+    getProxySettingDefaults: vi.fn(),
+  })
+);
 
 // ── Mantine form ───────────────────────────────────────────────────────────────
 vi.mock('@mantine/form', () => ({ useForm: vi.fn() }));

@@ -150,14 +150,13 @@ class InitializeChannelOwnershipOrderTests(SimpleTestCase):
 
         hset_states = []
 
-        def track_hset(*args, **kwargs):
-            mapping = kwargs.get("mapping") or (args[1] if len(args) > 1 else {})
-            if isinstance(mapping, dict) and "state" in mapping:
-                hset_states.append(mapping["state"])
-            # Ownership must already have been acquired before any state write
+        def track_init(_script, _key_count, *_args):
+            import json
+            hset_states.append(json.loads(_args[7])["state"])
             server.try_acquire_ownership.assert_called()
+            return 1
 
-        redis.hset.side_effect = track_hset
+        redis.eval.side_effect = track_init
 
         with patch("apps.proxy.live_proxy.server.StreamBuffer"), \
                 patch("apps.proxy.live_proxy.server.ClientManager"), \

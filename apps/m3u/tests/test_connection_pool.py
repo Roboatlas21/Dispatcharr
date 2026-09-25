@@ -29,8 +29,8 @@ class FakeRedis:
 
     def get(self, key):
         val = self._data.get(key)
-        if val is None:
-            return None
+        if val is None or isinstance(val, bytes):
+            return val
         if isinstance(val, str):
             return val.encode()
         return str(val).encode()
@@ -51,6 +51,9 @@ class FakeRedis:
 
     def delete(self, key):
         self._data.pop(key, None)
+
+    def hdel(self, key, *fields):
+        return 0  # These tests do not populate channel metadata hashes.
 
     def pipeline(self):
         return FakeRedisPipeline(self)
@@ -73,6 +76,10 @@ class FakeRedisPipeline:
         self._ops.append(("set", key, value))
         return self
 
+    def delete(self, key):
+        self._ops.append(("delete", key))
+        return self
+
     def execute(self):
         for op in self._ops:
             if op[0] == "decr":
@@ -81,6 +88,8 @@ class FakeRedisPipeline:
                 self.redis.incr(op[1])
             elif op[0] == "set":
                 self.redis.set(op[1], op[2])
+            elif op[0] == "delete":
+                self.redis.delete(op[1])
         self._ops = []
 
 
@@ -345,7 +354,12 @@ class PoolEnforcementTests(TestCase):
 
         self.assertEqual(self.redis._data[profile_connections_key(profile_id)], 0)
         self.assertEqual(self.redis._data[cred_key], 0)
-        self.assertNotIn(profile_credential_release_key(profile_id), self.redis._data)
+        # The binding is retained even at zero; repeated cleanup cannot
+        # consume another profile's slot merely because this key still exists.
+        self.assertEqual(
+            self.redis.get(profile_credential_release_key(profile_id)),
+            cred_key.encode(),
+        )
 
     def test_release_uses_stored_credential_key_without_db_lookup(self):
         profile_id = self.profile.id
@@ -626,3 +640,169 @@ class VodProfileSelectionTests(TestCase):
         self.assertIsNotNone(result)
         selected, _connections = result
         self.assertEqual(selected.id, alt.id)
+
+
+class ProfileSwitchReleaseTests(TestCase):
+    def make_case(self, distinct_groups=False, limits=(4, 4)):
+        from apps.channels.models import Channel, Stream
+
+        redis = FakeRedis()
+        case_id = ServerGroup.objects.count()
+        group_a = ServerGroup.objects.create(name=f"A-{case_id}")
+        group_b = ServerGroup.objects.create(name=f"B-{case_id}") if distinct_groups else group_a
+        profiles = []
+        streams = []
+        for (name, group), limit in zip((("A", group_a), ("B", group_b)), limits):
+            account = M3UAccount.objects.create(
+                name=f"{name}-{case_id}", account_type="XC", username="same-user", password="same-pass",
+                server_url=f"http://{name.lower()}.example", server_group=group,
+                max_streams=4,
+            )
+            profile = M3UAccountProfile.objects.get(m3u_account=account, is_default=True)
+            profile.max_streams = limit
+            profile.save(update_fields=["max_streams"])
+            profiles.append(profile)
+            streams.append(Stream.objects.create(name=name, m3u_account=account))
+        channel = Channel.objects.create(channel_number=1001, name="Review")
+        channel.streams.add(*streams)
+        a, b = profiles
+        self.assertTrue(reserve_profile_slot(a, redis)[0])
+        redis.set(f"channel_stream:{channel.id}", streams[0].id)
+        redis.set(f"stream_profile:{streams[0].id}", a.id)
+        key_a = server_group_connections_key(group_a.id, get_profile_credential_fingerprint(a))
+        key_b = server_group_connections_key(group_b.id, get_profile_credential_fingerprint(b))
+        return redis, channel, a, b, streams[1], key_a, key_b
+
+    def switch(self, redis, channel, b, stream_b):
+        with patch("core.utils.RedisClient.get_client", return_value=redis):
+            self.assertTrue(channel.update_stream_profile(b.id, new_stream_id=stream_b.id))
+
+
+    def test_switch_reservations_release_for_each_pool_layout(self):
+        for separate, limit, extra_a, extra_b in (
+            (False, 4, 0, 0), (True, 4, 0, 1), (False, 4, 2, 0),
+            (False, 1, 0, 0), (False, 4, 0, 2),
+        ):
+            with self.subTest(separate=separate, limit=limit, extra_a=extra_a, extra_b=extra_b):
+                redis, channel, a, b, stream_b, key_a, key_b = self.make_case(separate, (limit, limit))
+                for profile, count in ((a, extra_a), (b, extra_b)):
+                    for _ in range(count):
+                        self.assertTrue(reserve_profile_slot(profile, redis)[0])
+                self.switch(redis, channel, b, stream_b)
+                self.assertEqual(redis.get(profile_credential_release_key(b.id)), key_b.encode())
+                self.assertEqual(int(redis.get(profile_connections_key(a.id))), extra_a)
+                self.assertEqual(int(redis.get(profile_connections_key(b.id))), 1 + extra_b)
+                self.assertEqual(int(redis.get(key_b)), 1 + extra_b + (0 if separate else extra_a))
+                for profile, count in ((a, extra_a), (b, extra_b)):
+                    for _ in range(count):
+                        release_profile_slot(profile.id, redis)
+                release_profile_slot(a.id, redis)  # A is already at zero; B must retain its slot.
+                self.assertEqual(int(redis.get(key_b)), 1)
+                with patch("core.utils.RedisClient.get_client", return_value=redis):
+                    self.assertTrue(channel.release_stream())
+                for key in (key_a, key_b, profile_connections_key(a.id), profile_connections_key(b.id)):
+                    self.assertEqual(int(redis.get(key)), 0)
+
+    def test_new_old_profile_reservation_keeps_its_release_key(self):
+        redis, channel, a, b, stream_b, key, _ = self.make_case()
+        original_get = redis.get
+        armed = True
+
+        def reserve_after_count_read(name):
+            nonlocal armed
+            value = original_get(name)
+            if armed and name == profile_connections_key(a.id):
+                armed = False
+                # Another initialization reserves A during the switch. The
+                # switching worker must not remove its release binding.
+                self.assertTrue(reserve_profile_slot(a, redis)[0])
+            return value
+
+        with patch.object(redis, "get", side_effect=reserve_after_count_read):
+            self.switch(redis, channel, b, stream_b)
+        self.assertFalse(armed)
+        self.assertEqual(int(redis.get(profile_connections_key(a.id))), 1)
+        self.assertEqual(redis.get(profile_credential_release_key(a.id)), key.encode())
+        release_profile_slot(a.id, redis)
+        with patch("core.utils.RedisClient.get_client", return_value=redis):
+            self.assertTrue(channel.release_stream())
+        self.assertEqual(int(redis.get(key)), 0)
+
+
+    def test_full_destination_never_releases_old_pool_slot(self):
+        redis, channel, a, b, stream_b, key_a, key_b = self.make_case(
+            distinct_groups=True, limits=(1, 1),
+        )
+        occupant = M3UAccountProfile.objects.create(
+            m3u_account=b.m3u_account, name="Occupant", max_streams=1,
+        )
+        competitor = M3UAccountProfile.objects.create(
+            m3u_account=a.m3u_account, name="Competitor", max_streams=1,
+        )
+        self.assertTrue(reserve_profile_slot(occupant, redis)[0])
+        original_incr = redis.incr
+        competitor_results = []
+
+        def contend_during_target_reservation(key):
+            value = original_incr(key)
+            if key == key_b:
+                competitor_results.append(reserve_profile_slot(competitor, redis)[0])
+            return value
+
+        with patch.object(redis, "incr", side_effect=contend_during_target_reservation), \
+             patch("core.utils.RedisClient.get_client", return_value=redis):
+            self.assertFalse(channel.update_stream_profile(b.id, new_stream_id=stream_b.id))
+        self.assertEqual(competitor_results, [False])
+        self.assertEqual(int(redis.get(key_a)), 1)
+        self.assertEqual(int(redis.get(key_b)), 1)
+        self.assertEqual(int(redis.get(profile_connections_key(a.id))), 1)
+        self.assertEqual(int(redis.get(profile_connections_key(b.id))), 0)
+        active_stream = int(redis.get(f"channel_stream:{channel.id}"))
+        self.assertEqual(int(redis.get(f"stream_profile:{active_stream}")), a.id)
+
+
+    def test_switch_to_unlimited_profile_does_not_release_other_viewer(self):
+        redis, channel, a, b, stream_b, key, _ = self.make_case(limits=(1, 0))
+        self.switch(redis, channel, b, stream_b)
+        self.assertEqual(int(redis.get(key)), 0)
+        self.assertTrue(reserve_profile_slot(a, redis)[0])
+        with patch("core.utils.RedisClient.get_client", return_value=redis):
+            self.assertTrue(channel.release_stream())
+        self.assertEqual(int(redis.get(key)), 1)
+        release_profile_slot(a.id, redis)
+        self.assertEqual(int(redis.get(key)), 0)
+
+    def test_unlimited_source_cannot_reuse_an_idle_binding(self):
+        redis, channel, a, b, stream_b, key, _ = self.make_case(limits=(0, 1))
+        # Simulate a binding left from an earlier limited configuration.
+        redis.set(profile_credential_release_key(a.id), key)
+        occupant = M3UAccountProfile.objects.create(
+            m3u_account=b.m3u_account, name="Occupant", max_streams=1,
+        )
+        self.assertTrue(reserve_profile_slot(occupant, redis)[0])
+        with patch("core.utils.RedisClient.get_client", return_value=redis):
+            self.assertFalse(channel.update_stream_profile(b.id, new_stream_id=stream_b.id))
+        self.assertEqual(int(redis.get(key)), 1)
+        release_profile_slot(occupant.id, redis)
+        self.switch(redis, channel, b, stream_b)
+        self.assertEqual(int(redis.get(key)), 1)
+
+    def test_missing_target_fingerprint_keeps_old_reservation(self):
+        redis, channel, a, b, stream_b, key, _ = self.make_case()
+        with patch("apps.m3u.connection_pool.get_profile_credential_fingerprint", return_value=None), \
+             patch("core.utils.RedisClient.get_client", return_value=redis):
+            self.assertFalse(channel.update_stream_profile(b.id, new_stream_id=stream_b.id))
+        self.assertEqual(int(redis.get(key)), 1)
+        self.assertEqual(int(redis.get(profile_connections_key(a.id))), 1)
+        self.assertEqual(int(redis.get(profile_connections_key(b.id))), 0)
+
+    def test_unpooled_reservation_refreshes_idle_binding(self):
+        redis, channel, a, b, stream_b, key, _ = self.make_case()
+        release_profile_slot(a.id, redis)
+        self.assertTrue(reserve_profile_slot(b, redis)[0])
+        a.m3u_account.server_group = None
+        a.m3u_account.save(update_fields=["server_group"])
+        self.assertTrue(reserve_profile_slot(a, redis)[0])
+        release_profile_slot(a.id, redis)
+        self.assertEqual(int(redis.get(key)), 1)
+        self.assertFalse(redis.get(profile_credential_release_key(a.id)))
