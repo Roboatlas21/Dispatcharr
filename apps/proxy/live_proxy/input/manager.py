@@ -209,6 +209,8 @@ class StreamManager:
 
     def _reset_source_state(self):
         """Reset media readiness without changing rotation or event history."""
+        self._buffering_check_requested = False
+        self._buffering_retry_at = 0
         self._current_source_has_media = False
         self._source_published_index = self.buffer.published_index
         self._fail_fast_candidate = False
@@ -544,6 +546,7 @@ class StreamManager:
                     continue
                 # A manual change must not let the old attempt charge the new source.
                 source_generation = self._rotation_generation
+                switched_for_buffering = False
                 # Connection retry loop for current URL
                 while (
                     self.running
@@ -601,21 +604,13 @@ class StreamManager:
                                 except Exception as e:
                                     logger.error(f"Could not log reconnection event: {e}")
 
-                            # Successfully connected - read stream data until disconnect/error
-                            self._process_stream_data()
-                            # If we get here, the connection was closed/failed
+                            stream_switch_attempts, switched_for_buffering = self._read_with_buffering_checks(
+                                source_generation, stream_switch_attempts, max_stream_switches
+                            )
                             if source_generation != self._rotation_generation or self.url_switching:
                                 break
 
                             connection_duration = time.time() - connection_start_time
-                            if self._attempt_was_stable:
-                                logger.info(
-                                    f"Stream reached the stable-media threshold, "
-                                    f"resetting switch rotation state for channel: {self.channel_id}"
-                                )
-                                self._note_stable_connection()
-                                stream_switch_attempts = 0
-
                             if self.needs_stream_switch:
                                 logger.info(f"Stream needs to switch after {connection_duration:.1f} seconds for channel: {self.channel_id}")
                                 break  # Exit to switch streams
@@ -701,7 +696,8 @@ class StreamManager:
                         gevent.sleep(timeout)
 
                 if source_generation != self._rotation_generation or self.url_switching:
-                    stream_switch_attempts = 0
+                    if not switched_for_buffering:
+                        stream_switch_attempts = 0
                     continue
                 # If URL failed and we're still running, try switching to another stream
                 if url_failed and self.running:
@@ -1275,12 +1271,11 @@ class StreamManager:
                     if self.buffering_start_time is None:
                         self.buffering_start_time = time.time()
                     else:
-                        buffering_duration = time.time() - self.buffering_start_time
-                        if buffering_duration > self.buffering_timeout:
-                            logger.error(f"Buffering timeout reached for channel {self.channel_id} after {buffering_duration:.1f} seconds")
-                            self.pending_buffering_failover_duration = buffering_duration
-                            self.needs_reconnect = False
-                            self.needs_stream_switch = True
+                        now = time.time()
+                        if (now - self.buffering_start_time >= self.buffering_timeout
+                                and now >= self._buffering_retry_at):
+                            self._buffering_retry_at = now + self.buffering_timeout
+                            self._buffering_check_requested = True
                 else:
                     # Buffering just started, set the flag and start timer
                     self.buffering = True
@@ -1312,6 +1307,8 @@ class StreamManager:
                     logger.info(f"Buffering ended for channel {self.channel_id} - speed: {ffmpeg_speed}x")
                     self.buffering = False
                     self.buffering_start_time = None
+                    self._buffering_check_requested = False
+                    self._buffering_retry_at = 0
                     # Set channel state to active if speed is good
                     if hasattr(self.buffer, 'redis_client') and self.buffer.redis_client:
                         metadata_key = RedisKeys.channel_metadata(self.channel_id)
@@ -1429,14 +1426,40 @@ class StreamManager:
         except Exception as e:
             logger.error(f"Error updating bytes processed: {e}")
 
+    def _read_with_buffering_checks(self, generation, switch_attempts, max_switches):
+        """Keep the current reader open until a backup handoff succeeds or the input fails."""
+        while generation == self._rotation_generation and not self.url_switching:
+            check_requested = self._process_stream_data()
+            if generation != self._rotation_generation or self.url_switching:
+                break
+            if self._attempt_was_stable:
+                logger.info("Resetting failover rotation after stable playback on %s", self.channel_id)
+                self._note_stable_connection()
+                self._attempt_was_stable = False
+                switch_attempts = 0
+            if check_requested is not True:
+                break
+            self._buffering_check_requested = False
+            if not self.buffering or self.buffering_start_time is None or switch_attempts >= max_switches:
+                continue
+            if self._rotation_started_at is None:
+                self._rotation_started_at = time.monotonic()
+            duration = time.time() - self.buffering_start_time
+            logger.info("Buffering for %.1fs on %s; checking alternate streams", duration, self.channel_id)
+            if self._try_next_stream(buffering_duration=duration):
+                return switch_attempts + 1, True
+        return switch_attempts, False
+
     def _process_stream_data(self):
-        """Process stream data until disconnect or error - unified path for both transcode and HTTP"""
+        """Read until disconnect or recovery. Return True to check backups with the reader intact."""
         generation = self._rotation_generation
         try:
             # Both transcode and HTTP now use the same subprocess/socket approach
             # This gives us perfect control: check flags between chunks, timeout just returns False
             while (self.running and self.connected and not self.stop_requested
                    and not self.needs_stream_switch and not self.needs_reconnect):
+                if self._buffering_check_requested:
+                    return True
                 success = self.fetch_chunk()
                 if generation != self._rotation_generation or self.url_switching:
                     return  # Do not change the replacement's connected/media state.
@@ -1608,7 +1631,8 @@ class StreamManager:
 
     def update_url(self, new_url, stream_id=None, m3u_profile_id=None, force=False,
                    expected_generation=None, user_agent=None, stream_name=None,
-                   stream_profile=None, transcode=None, manual=False, fail_fast=None):
+                   stream_profile=None, transcode=None, manual=False, fail_fast=None,
+                   buffering_duration=None):
         """Serialize preparation, handoff and publication without cancelling rejected readers."""
         if not self._switch_lock.acquire(blocking=False):
             return None
@@ -1666,6 +1690,8 @@ class StreamManager:
                 return None
 
             # Only accepted handoffs fence readers; preparation leaves playback running.
+            if buffering_duration is not None and not self.buffering:
+                return False
             self._rotation_generation += 1
             generation = self._rotation_generation
             self.url_switching = True
@@ -1720,11 +1746,15 @@ class StreamManager:
             if manual:
                 self.reset_failover_rotation_state()
                 self.pending_buffering_failover_duration = None
+            elif buffering_duration is not None:
+                self.pending_buffering_failover_duration = buffering_duration
             if fail_fast is not None:
                 self.failover_started_at = time.monotonic()
                 self._fail_fast_candidate = fail_fast
             self._source_switch_time = time.time()
             self._source_switch_reason = 'manual' if manual else 'max_retries_exceeded'
+            if buffering_duration is not None:
+                self._source_switch_reason = 'buffering_timeout'
             # Also reset buffer position to prevent stale data after URL change
             if hasattr(self.buffer, 'reset_buffer_position'):
                 try:
@@ -2075,7 +2105,8 @@ class StreamManager:
                         while True:
                             if (generation != self._rotation_generation or self.url_switching
                                     or not self.running or self.stop_requested
-                                    or self.needs_stream_switch or self.needs_reconnect):
+                                    or self.needs_stream_switch or self.needs_reconnect
+                                    or self._buffering_check_requested):
                                 return False
                             remaining = deadline - time.monotonic()
                             if remaining <= 0:
@@ -2256,7 +2287,7 @@ class StreamManager:
             logger.error(f"Error in buffer check for channel {self.channel_id}: {e}")
             return False
 
-    def _try_next_stream(self, new_rotation=False):
+    def _try_next_stream(self, new_rotation=False, buffering_duration=None):
         """
         Try to switch to the next available stream for this channel.
         Will iterate through eligible alternate streams until a handoff succeeds.
@@ -2279,6 +2310,8 @@ class StreamManager:
                 return status
             if new_rotation:
                 self.tried_stream_ids.clear()
+                if buffering_duration is not None:
+                    self.tried_stream_ids.add(self.current_stream_id)
             logger.info(f"Found {len(alternate_streams)} potential alternate streams for channel {self.channel_id}")
 
             # Filter out streams we've already tried
@@ -2290,6 +2323,12 @@ class StreamManager:
                 logger.warning(f"No untried streams available for channel {self.channel_id}, tried: {self.tried_stream_ids}")
 
             if not untried_streams:
+                # A slow, connected input keeps serving between passes. Wrap only
+                # when a different source exists and the configured interval elapsed.
+                if (buffering_duration is not None and not new_rotation and alternate_streams
+                        and self._rotation_interval_remaining() <= 0):
+                    self._rotation_started_at = time.monotonic()
+                    return self._try_next_stream(new_rotation=True, buffering_duration=buffering_duration)
                 return False
 
             for next_stream in untried_streams:
@@ -2314,6 +2353,8 @@ class StreamManager:
 
                 # Update URL and user agent
                 new_url = stream_info['url']
+                if buffering_duration is not None and self.current_stream_id is None and new_url == self.url:
+                    continue
                 new_user_agent = stream_info['user_agent']
                 new_transcode = stream_info['transcode']
 
@@ -2325,7 +2366,7 @@ class StreamManager:
                     expected_generation=generation, user_agent=new_user_agent,
                     stream_name=stream_info.get('stream_name'),
                     stream_profile=stream_info['stream_profile'], transcode=new_transcode,
-                    fail_fast=not new_rotation,
+                    fail_fast=not new_rotation, buffering_duration=buffering_duration,
                 )
                 if switch_result is None:
                     return None

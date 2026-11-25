@@ -1,6 +1,6 @@
 """Tests for provider/profile accounting during live failover."""
 
-from unittest.mock import MagicMock, patch
+from unittest.mock import MagicMock, call, patch
 
 from django.test import TransactionTestCase
 
@@ -9,6 +9,7 @@ from apps.m3u.connection_pool import profile_connections_key, reserve_profile_sl
 from apps.m3u.models import M3UAccount, M3UAccountProfile
 from apps.proxy.live_proxy.input.manager import StreamManager
 from apps.m3u.tests.test_connection_pool import FakeRedis
+from core.models import StreamProfile
 
 
 class ProviderFailoverHandoffTests(TransactionTestCase):
@@ -20,6 +21,7 @@ class ProviderFailoverHandoffTests(TransactionTestCase):
         self.channel = Channel.objects.create(
             channel_number=9001,
             name="Failover Test",
+            stream_profile=StreamProfile.objects.create(name="Test proxy"),
         )
         self.channel.streams.add(self.stream_a, self.stream_b)
 
@@ -53,7 +55,7 @@ class ProviderFailoverHandoffTests(TransactionTestCase):
         self.assertEqual((self._profile_count(self.profile_a), self._profile_count(self.profile_b)), counts)
 
     def _manager(self):
-        buffer = MagicMock(index=0, published_index=0, redis_client=None)
+        buffer = MagicMock(index=0, published_index=0, redis_client=None, stopping=False)
         with patch("apps.proxy.config.TSConfig.get_proxy_settings", return_value={}):
             return StreamManager(
                 str(self.channel.uuid), self.stream_a.url, buffer,
@@ -62,6 +64,100 @@ class ProviderFailoverHandoffTests(TransactionTestCase):
 
     def _switch_manager_to_b(self, manager):
         return manager.update_url(self.stream_b.url, self.stream_b.id, self.profile_b.id, expected_generation=0)
+
+    def _run_buffering_episode(self, on_sample=None):
+        manager = self._manager()
+        manager.buffering_timeout = 5
+        manager.buffering_speed = 1.0
+        clock = 100
+        samples = iter([100, 104, 105, 106, 110, 111])
+        connections = []
+        published = []
+
+        def connect():
+            connections.append((manager.current_stream_id, clock))
+            manager.socket = MagicMock()
+            manager.socket.recv.side_effect = receive
+            manager.connected = True
+            return True
+
+        def receive(_size):
+            nonlocal clock
+            if len(connections) > 1:
+                manager.running = False
+                return b""
+            clock = next(samples)
+            if on_sample:
+                on_sample(clock)
+            if clock == 111:
+                return b""
+            manager._parse_ffmpeg_stats("speed=0.999x")
+            return b"\x47" + bytes(187)
+
+        def publish(_chunk):
+            manager.buffer.published_index += 1
+            published.append(clock)
+            return True
+
+        manager.buffer.add_chunk.side_effect = publish
+        with patch("core.utils.RedisClient.get_client", return_value=self.redis), \
+             patch("apps.proxy.live_proxy.input.manager.log_system_event"), \
+             patch("apps.proxy.live_proxy.input.manager.time.time", side_effect=lambda: clock), \
+             patch.object(manager, "_monitor_health"), \
+             patch.object(manager, "_ensure_owner_or_stop", return_value=True), \
+             patch.object(manager, "_establish_http_connection", side_effect=connect), \
+             patch.object(manager, "_establish_transcode_connection", side_effect=connect), \
+             patch.object(manager, "_try_next_stream", wraps=manager._try_next_stream) as checks:
+            manager.run()
+        return manager, connections, published, checks.call_args_list
+
+    def test_one_buffering_feed_publishes_until_eof_then_reconnects(self):
+        self.channel.streams.remove(self.stream_b)
+        manager, connections, published, checks = self._run_buffering_episode()
+        self.assertEqual(connections, [(self.stream_a.id, 100), (self.stream_a.id, 111)])
+        self.assertEqual(published, [100, 104, 105, 106, 110])
+        self.assertEqual(checks, [call(buffering_duration=5), call(buffering_duration=10)])
+        self.assertIsNone(manager.pending_buffering_failover_duration)
+        self._assert_assignment(self.stream_a, self.profile_a, (1, 0))
+
+    def test_buffering_switches_to_available_backup_at_five_seconds(self):
+        manager, connections, published, checks = self._run_buffering_episode()
+        self.assertEqual(connections, [(self.stream_a.id, 100), (self.stream_b.id, 105)])
+        self.assertEqual(published, [100, 104, 105])
+        self.assertEqual(checks, [call(buffering_duration=5)])
+        self.assertEqual(manager.pending_buffering_failover_duration, 5)
+        self._assert_assignment(self.stream_b, self.profile_b, (0, 1))
+
+    def test_full_backup_is_rechecked_while_primary_keeps_publishing(self):
+        self.assertTrue(reserve_profile_slot(self.profile_b, self.redis)[0])
+
+        def free_backup(clock):
+            if clock == 106:
+                self.redis.decr(profile_connections_key(self.profile_b.id))
+
+        manager, connections, published, checks = self._run_buffering_episode(free_backup)
+        self.assertEqual(connections, [(self.stream_a.id, 100), (self.stream_b.id, 110)])
+        self.assertEqual(published, [100, 104, 105, 106, 110])
+        self.assertEqual(checks, [call(buffering_duration=5), call(buffering_duration=10)])
+        self.assertEqual(manager.pending_buffering_failover_duration, 10)
+
+    def test_buffering_retries_exhausted_backups_only_after_rotation_interval(self):
+        manager = self._manager()
+        manager.connected = manager.buffering = True
+        manager.tried_stream_ids = {self.stream_a.id, self.stream_b.id}
+        manager._rotation_started_at = 100
+        manager.min_failover_rotation_interval = 10
+        with patch("core.utils.RedisClient.get_client", return_value=self.redis), \
+             patch.object(manager, "_ensure_owner_or_stop", return_value=True), \
+             patch("apps.proxy.live_proxy.input.manager.log_system_event"), \
+             patch("apps.proxy.live_proxy.input.manager.time.monotonic") as clock:
+            clock.return_value = 105
+            self.assertFalse(manager._try_next_stream(buffering_duration=5))
+            self.assertTrue(manager.connected)
+            self.assertIsNone(manager.pending_buffering_failover_duration)
+            clock.return_value = 110
+            self.assertTrue(manager._try_next_stream(buffering_duration=10))
+            self.assertEqual(manager.current_stream_id, self.stream_b.id)
 
     def test_owner_loss_rolls_back_provider_handoff(self):
         manager = self._manager()

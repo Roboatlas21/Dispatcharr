@@ -71,7 +71,7 @@ def _make_stream_manager(redis_client, buffering_timeout=1.0, buffering_speed=1.
 
 class BufferingTimeoutFailoverStateTests(TestCase):
     @patch.object(StreamManager, "_update_ffmpeg_stats_in_redis")
-    def test_buffering_timeout_requests_switch_but_keeps_buffering(
+    def test_buffering_timeout_checks_for_backup_without_stopping_reader(
         self, _update_stats
     ):
         redis = _DictRedis()
@@ -90,9 +90,10 @@ class BufferingTimeoutFailoverStateTests(TestCase):
                 )
 
         self.assertTrue(sm.buffering)
-        self.assertTrue(sm.needs_stream_switch)
+        self.assertTrue(sm._buffering_check_requested)
+        self.assertFalse(sm.needs_stream_switch)
         self.assertFalse(sm.needs_reconnect)
-        self.assertEqual(sm.pending_buffering_failover_duration, 10.0)
+        self.assertIsNone(sm.pending_buffering_failover_duration)
         self.assertEqual(
             redis.hashes[metadata_key][ChannelMetadataField.STATE],
             ChannelState.BUFFERING,
